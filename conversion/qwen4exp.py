@@ -103,8 +103,10 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         self.gguf_writer.add_attention_compress_ratios(ratios)
 
         # ple_layer_ids is 1-based in the HF config; empty means no n-gram table,
-        # so emit no PLE keys rather than optional ones
-        ple_layers = [] if self._no_ple else [i - 1 for i in hp["ple_layer_ids"]]
+        # so emit no PLE keys rather than optional ones. An MTP-only export has no
+        # PLE layer either, and its filter has already dropped the hash constants
+        # that would be read below.
+        ple_layers = [] if (self._no_ple or self.mtp_only) else [i - 1 for i in hp["ple_layer_ids"]]
         if not ple_layers:
             return
         self.gguf_writer.add_ple_layers(ple_layers)
