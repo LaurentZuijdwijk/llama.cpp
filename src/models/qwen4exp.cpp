@@ -1,6 +1,7 @@
 #include "models.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
+#include "llama-ple-disk.h"
 
 void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        hparams.n_ff_exp, false);
@@ -103,10 +104,24 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
     if (hparams.ple_n_heads > 0) {
         const std::string joined = tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight").str();
         if (const auto * w = ml.get_weight(joined.c_str())) {
-            // Upstream layout: every head in one tensor. It stays on the host whatever
-            // -ngl says, because it is past the buffer size a device will accept.
-            ple_joined = create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"),
-                                       { hparams.ple_head_dim, w->tensor->ne[1] }, 0);
+            if (params.ple_on_disk) {
+                // The table is counted as created but never allocated, mapped or read; each
+                // ubatch gathers its rows straight from the file (llm_graph_input_ple::set_input).
+                llama_ple_disk::params dp;
+                dp.n_threads   = params.ple_io_threads;
+                dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+                dp.direct_io   = params.ple_direct_io;
+                ple_disk = std::make_shared<llama_ple_disk>(ml.fnames.at(w->idx), w->offs,
+                                                            w->tensor->type, w->tensor->ne[0], w->tensor->ne[1], dp);
+                LLAMA_LOG_INFO("%s: PLE n-gram table stays on disk: %s\n", __func__, ple_disk->describe().c_str());
+                create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"),
+                              { hparams.ple_head_dim, w->tensor->ne[1] }, TENSOR_SKIP);
+            } else {
+                // Upstream layout: every head in one tensor. It stays on the host whatever
+                // -ngl says, because it is past the buffer size a device will accept.
+                ple_joined = create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"),
+                                           { hparams.ple_head_dim, w->tensor->ne[1] }, 0);
+            }
         } else {
             ple_ngram_embd.resize(hparams.ple_n_heads);
             for (uint32_t h = 0; h < hparams.ple_n_heads; ++h) {
@@ -999,6 +1014,10 @@ public:
     void set_input(const llama_ubatch * ubatch) override;
 
     ggml_tensor * rows = nullptr;   // I32 [ple_n_heads * n_tokens]
+    ggml_tensor * embd = nullptr;   // F32 [ple_head_dim, ple_n_heads * n_tokens]: the gathered rows, when the table is on disk
+
+    std::vector<float>   embd_buf;
+    std::vector<int32_t> rows_global;
 
     const llama_model_qwen4exp & pmodel;
 };
@@ -1110,6 +1129,22 @@ void llm_graph_input_ple::set_input(const llama_ubatch * ubatch) {
         h.next_pos = pos + 1;
     }
 
+    if (pmodel.ple_disk) {
+        // idx is head-major and head-local; the reader wants one global row per (token, head)
+        // in token-major order, which is the layout the per-head gather + concat produces.
+        GGML_ASSERT(embd != nullptr && rows == nullptr);
+        rows_global.resize(idx.size());
+        for (int64_t i = 0; i < n_tokens; ++i) {
+            for (int64_t h = 0; h < n_heads; ++h) {
+                rows_global[i*n_heads + h] = (int32_t) (idx[h*n_tokens + i] + (int64_t) hp.ple_head_offsets[h]);
+            }
+        }
+        embd_buf.resize(rows_global.size() * (size_t) hp.ple_head_dim);
+        pmodel.ple_disk->gather(rows_global.data(), rows_global.size(), embd_buf.data());
+        ggml_backend_tensor_set(embd, embd_buf.data(), 0, embd_buf.size() * sizeof(float));
+        return;
+    }
+
     ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
 }
 
@@ -1184,9 +1219,20 @@ ggml_tensor * llama_model_qwen4exp::graph::build_ple(
     auto ple_inp = std::make_unique<llm_graph_input_ple>(
             static_cast<const llama_model_qwen4exp &>(model));
 
-    ple_inp->rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_heads * n_tokens);
-    ggml_set_input(ple_inp->rows);
-    ggml_tensor * rows = ple_inp->rows;
+    const auto & qmodel = static_cast<const llama_model_qwen4exp &>(model);
+    ggml_tensor * rows = nullptr;
+    ggml_tensor * emb  = nullptr;
+    if (qmodel.ple_disk) {
+        // table on disk: the gather happened in set_input and arrives as an F32 input,
+        // token-major, which reshapes to what the per-head gathers + concat produce
+        ple_inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.ple_head_dim, n_heads * n_tokens);
+        ggml_set_input(ple_inp->embd);
+        emb = ple_inp->embd;
+    } else {
+        ple_inp->rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_heads * n_tokens);
+        ggml_set_input(ple_inp->rows);
+        rows = ple_inp->rows;
+    }
     res->add_input(std::move(ple_inp));
 
     // gather then flatten the heads: get_rows already lays the head dimension
@@ -1194,10 +1240,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_ple(
     // One gather per head, then concatenate along the row axis. Concatenating in head
     // order reproduces exactly what the single gather over the joined table produced,
     // because that laid the head dimension out slowest.
-    const auto & qmodel = static_cast<const llama_model_qwen4exp &>(model);
-
-    ggml_tensor * emb = nullptr;
-    for (int64_t h = 0; h < n_heads; ++h) {
+    for (int64_t h = 0; rows != nullptr && h < n_heads; ++h) {
         ggml_tensor * tbl = qmodel.ple_joined
             ? ggml_view_2d(ctx0, qmodel.ple_joined, hparams.ple_head_dim, hparams.ple_head_vocab_sizes[h],
                            qmodel.ple_joined->nb[1], hparams.ple_head_offsets[h]*qmodel.ple_joined->nb[1])

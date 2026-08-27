@@ -83,6 +83,7 @@ struct llama_model_loader {
     bool load_mtp;
 
     llama_files files;
+    std::vector<std::string> fnames; // one per entry of files, for readers that outlive the loader
     llama_ftype ftype;
     llama_fver  fver;
 
