@@ -1877,15 +1877,31 @@ void llama_kv_cache::get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, st
     std::array<std::pair<llama_pos, llama_token>, LLAMA_MAX_SEQ> below;
     below.fill({ -1, LLAMA_TOKEN_NULL });
 
+    // [w0, p_max] holds exactly this many distinct positions per sequence; once a
+    // sequence's hist entries reach that count every position in the window has a hit,
+    // so lookup() below can never fall through to below[] for it - a scan can stop
+    // there without ever consulting below[] again for that sequence. Text generation
+    // (the common case) has no gaps and hits this on the first few cells scanned;
+    // sequences with genuine gaps (M-RoPE) just never trip it and fall back to a full
+    // scan, same as before this was added.
+    const uint32_t window_width = (uint32_t) (p_max - w0 + 1);
+
+    std::array<uint32_t, LLAMA_MAX_SEQ> hist_count;
+    hist_count.fill(0);
+    std::bitset<LLAMA_MAX_SEQ> seq_done;
+
     for (uint32_t s = 0; s < n_stream; ++s) {
         // p_max inclusive: an embd token looks up cells at its own (shared) position
-        v_cells[s].for_each_token_in(seqs, 0, p_max + 1,
-            [&](llama_seq_id seq_id, llama_pos pos, llama_token tok) {
+        v_cells[s].for_each_token_in_reverse(seqs, 0, p_max + 1,
+            [&](llama_seq_id seq_id, llama_pos pos, llama_token tok) -> bool {
                 if (pos >= w0) {
-                    hist[key(seq_id, pos)] = tok;
+                    if (hist.emplace(key(seq_id, pos), tok).second && ++hist_count[seq_id] >= window_width) {
+                        seq_done.set(seq_id);
+                    }
                 } else if (pos > below[seq_id].first) {
                     below[seq_id] = { pos, tok };
                 }
+                return seq_done.count() < seqs.count();
             });
     }
 

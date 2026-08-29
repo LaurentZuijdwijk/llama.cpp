@@ -2,7 +2,9 @@
 
 #include "llama-memory-hybrid.h"
 
+#include <map>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 //
@@ -75,6 +77,25 @@ public:
 
     llama_kv_cache * get_mem_idx() const;   // nullptr when the model carries no indexer
 
+    // [TAG_QSA_POOLED_CACHE]
+    // Cache of the indexer's block summary keys (mean-pooled, normalized, roped), one f32
+    // row per position block per QSA layer, written by the graph via set_rows. Only
+    // COMPLETE blocks are ever scored (incomplete tails ride the bias), and a complete
+    // block's members never change, so rows are write-once per content epoch. Validity is
+    // a per-sequence block watermark: rows < watermark hold the current content's
+    // summaries. Rollback safety is by construction: seq_rm clamps the watermark and the
+    // next ubatch repools the range. Rows at or beyond the watermark may hold
+    // stale-but-finite garbage; their scores are masked by the -inf bias exactly like an
+    // ordinary partial-block pool.
+
+    // pooled key tensor for layer il, or nullptr (no indexer / multi-stream / disabled)
+    ggml_tensor * get_pooled_k(int32_t il) const;
+
+    uint32_t get_pooled_rows() const { return pooled_rows; }   // rows per stream, incl. trailing dustbin row
+
+    // blocks of seq_id whose pooled rows are known valid; mutable via a const context, like the KV cache's own state
+    int64_t & pooled_valid(llama_seq_id seq_id) const;
+
 private:
     // forget seq_id (all of it if seq_id < 0) in every cache at once, so a failed restore cannot leave the caches out of step
     // seq_id < 0 drops the whole context, as the caches themselves do on a failed restore
@@ -85,6 +106,19 @@ private:
     llama_hparams hparams_idx;
 
     const std::unique_ptr<llama_kv_cache> mem_idx;
+
+    // [TAG_QSA_POOLED_CACHE] storage + watermarks; empty unless the model has a single-stream indexer
+    ggml_context_ptr        pooled_ctx;
+    ggml_backend_buffer_ptr pooled_buf;
+    std::map<int32_t, ggml_tensor *> pooled_k;
+
+    uint32_t pooled_rows = 0;
+
+    mutable std::unordered_map<llama_seq_id, int64_t> pooled_w;
+
+    // clamp helpers, one per llama_memory_i operation that can invalidate rows
+    void pooled_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
+    void pooled_reset(llama_seq_id seq_id);   // seq_id < 0 resets every sequence
 };
 
 class llama_memory_hybrid_idx_context : public llama_memory_hybrid_context {
@@ -137,9 +171,28 @@ public:
     //   bias      F32 [n_kv, n_tokens/ns, ns] -inf where invisible, large where always visible
     // blk_bias asks for the bias per block instead: [n_blocks, n_tokens/ns, ns]
     // the caller then adds the attention mask, the only part of the bias that varies within a block
+    // [TAG_QSA_POOLED_CACHE] the dirty_* tensors are optional: when given, blk_cells and
+    // blk_pos may be null (the caller has nothing else to build them for), and the fill
+    // instead resolves which blocks must be (re)pooled this ubatch - the range from the
+    // sequence's watermark to its last complete block - and advances the watermark.
+    //   dirty_cells I32 [ratio*n_dirty_max, 1]  cells of each block to (re)pool, 0-padded
+    //   dirty_pos   I32 [4*n_dirty_max]         mrope position rows of those blocks
+    //   dirty_rows  I64 [n_dirty_max]           pooled-cache rows to write, dustbin-padded
     void set_input_qsa(ggml_tensor * cell_blk, ggml_tensor * blk_cells, ggml_tensor * blk_pos,
                        ggml_tensor * bias, const llama_ubatch * ubatch, uint32_t ratio,
-                       bool blk_bias) const;
+                       bool blk_bias,
+                       ggml_tensor * dirty_cells = nullptr, ggml_tensor * dirty_pos = nullptr,
+                       ggml_tensor * dirty_rows = nullptr) const;
+
+    // [TAG_QSA_POOLED_CACHE] pooled tensor for il, or nullptr when the cache is unavailable
+    // (no indexer, multi-stream memory, or a non-batch context)
+    ggml_tensor * get_pooled_k(int32_t il) const;
+
+    uint32_t get_pooled_rows() const;
+
+    // capacity the dirty tables need for this ubatch: completed blocks since the sequence's
+    // watermark; stable at 1 during steady decode so graph reuse holds
+    uint32_t qsa_pooled_n_dirty_max(const llama_ubatch & ubatch, uint32_t ratio) const;
 
 private:
     const llama_memory_hybrid_idx * mem = nullptr;
