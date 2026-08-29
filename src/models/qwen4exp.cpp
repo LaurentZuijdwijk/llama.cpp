@@ -580,9 +580,14 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
     // plain attention input. create_memory gives that context an attention-only filter.
     auto        * inp_attn    = build_attn_inp_kv();
 
-    // the reference norms the whole hyper-connection row and splits into streams after,
-    // so hnorm spans hc*n_embd rather than one stream
-    ggml_tensor * h_norm = build_norm(h, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
+    // Grouped RMSNorm: each hc stream is normed over its own n_embd, and gamma is applied
+    // across the whole [hc*n_embd] row. Norming the full row instead (which this used to do)
+    // couples the streams through a shared scale, which is not what the head was trained on
+    // and measurably costs draft acceptance. Matches apepojken/llama.cpp@32af70900.
+    ggml_tensor * h_norm = ggml_reshape_3d(ctx0, h, n_embd, hc, n_tokens);
+    h_norm = ggml_rms_norm(ctx0, h_norm, hparams.f_norm_rms_eps);
+    h_norm = ggml_reshape_2d(ctx0, h_norm, hc*n_embd, n_tokens);
+    h_norm = ggml_mul(ctx0, h_norm, layer.nextn.hnorm);
     h_norm = ggml_reshape_3d(ctx0, h_norm, n_embd, hc, n_tokens);
     cb(h_norm, "mtp_hnorm", il);
 
