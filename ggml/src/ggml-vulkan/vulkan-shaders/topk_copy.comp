@@ -1,0 +1,33 @@
+#version 450
+
+// large-k top_k path: truncating copy of the first k int32 indices of each
+// row out of a full-width (ncols-wide), already descending-sorted scratch
+// buffer (written by a preceding argsort dispatch) into the real, k-wide
+// GGML_OP_TOP_K destination tensor. No ordering/selection logic here - the
+// scratch buffer is already correctly ordered, this only narrows the row
+// stride.
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+layout (constant_id = 0) const uint BLOCK_SIZE = 256;
+
+layout (binding = 0) readonly buffer S {int data_s[];};
+layout (binding = 1) writeonly buffer D {int data_d[];};
+
+layout (push_constant) uniform parameter {
+    uint ncols;
+    uint k;
+    uint nrows;
+} p;
+
+void main() {
+    const uint col = gl_GlobalInvocationID.x;
+    if (col >= p.k) {
+        return;
+    }
+
+    uint row = gl_WorkGroupID.y;
+    while (row < p.nrows) {
+        data_d[row * p.k + col] = data_s[row * p.ncols + col];
+        row += gl_WorkGroupSize.y * gl_NumWorkGroups.y;
+    }
+}

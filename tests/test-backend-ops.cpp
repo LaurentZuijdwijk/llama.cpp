@@ -6124,16 +6124,17 @@ struct test_top_k : public test_case {
     const std::array<int64_t, 4> ne;
     const int k;
     const bool ties;
+    const bool neg_inf;
     ggml_tensor * input {};
 
     std::string vars() override {
-        return VARS_TO_STR4(type, ne, k, ties);
+        return VARS_TO_STR5(type, ne, k, ties, neg_inf);
     }
 
     test_top_k(ggml_type type = GGML_TYPE_F32,
             std::array<int64_t, 4> ne = {16, 10, 10, 10},
-            int k = 4, bool ties = false)
-        : type(type), ne(ne), k(k), ties(ties) {}
+            int k = 4, bool ties = false, bool neg_inf = false)
+        : type(type), ne(ne), k(k), ties(ties), neg_inf(neg_inf) {}
 
     double max_err() override {
         return 0.0;
@@ -6233,6 +6234,14 @@ struct test_top_k : public test_case {
                     }
                 }
                 std::shuffle(data.begin(), data.end(), rng);
+                if (neg_inf) {
+                    // keep exactly k finite candidates; the rest are masked (-INFINITY),
+                    // mirroring qwen4exp's indexer score tensor where invisible cells are
+                    // -INFINITY and must never be selected regardless of magnitude
+                    for (int64_t i = k; i < t->ne[0]; i++) {
+                        data[i] = -INFINITY;
+                    }
+                }
                 ggml_backend_tensor_set(t, data.data(), r * t->nb[1], t->ne[0] * sizeof(float));
             }
         }
@@ -9725,9 +9734,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {(1<<i), 1, 1, 1}, k));
                 test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {(1<<i) + 11, 1, 2, 1}, k));
                 test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {(1<<i) + 11, 1, 2, 1}, k, true));
+                // -INFINITY sentinels (masked cells) must sort to the bottom and never be
+                // selected - exercises the large-k argsort-then-slice path specifically,
+                // mirroring the DeepSeek-V4-style sparse indexer's masked score tensor
+                if (k == 9999) {
+                    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {(1<<i), 1, 1, 1}, k, false, true));
+                }
             }
         }
     }
+    // qwen4exp-realistic: ncols tracking a growing KV cache, k = indexer_top_k + ratio - 1
+    test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {32768, 1, 1, 1}, 2051, false, true));
     for (int k : {1, 2, 3, 7, 15}) {
         test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {16, 10, 10, 10}, k));
         test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {60, 10, 10, 10}, k));
