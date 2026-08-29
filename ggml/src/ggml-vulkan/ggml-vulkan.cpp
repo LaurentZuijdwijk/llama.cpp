@@ -1043,7 +1043,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_argsort_f32[num_argsort_pipelines];
     vk_pipeline pipeline_argsort_large_f32[num_argsort_pipelines];
     vk_pipeline pipeline_topk_f32[num_topk_pipelines];
-    vk_pipeline pipeline_topk_copy_i32;
+    vk_pipeline pipeline_topk_radix_f32;
     vk_pipeline pipeline_sum_rows_f32;
     vk_pipeline pipeline_fwht_f32[4];
     vk_pipeline pipeline_cumsum_f32;
@@ -1722,14 +1722,6 @@ struct vk_op_topk_push_constants {
     uint32_t nrows;
     uint32_t first_pass;
     uint32_t last_pass;
-};
-
-// large-k top_k path: truncating copy of the first k columns of each row
-// out of a full-width (ncols-wide) descending-sorted-index scratch buffer
-struct vk_op_topk_copy_push_constants {
-    uint32_t ncols;   // stride of the full-width scratch row (== input ne[0])
-    uint32_t k;       // number of columns to keep per row
-    uint32_t nrows;
 };
 
 struct vk_op_im2col_push_constants {
@@ -6146,8 +6138,12 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         }
     }
 
-    // truncating copy for the large-k top_k path (argsort-then-slice); trivial, no feature gating needed
-    ggml_vk_create_pipeline(device, device->pipeline_topk_copy_i32, "topk_copy_i32", topk_copy_i32_len, topk_copy_i32_data, "main", 2, sizeof(vk_op_topk_copy_push_constants), {256, 1, 1}, {256}, 1);
+    // radix selection for k beyond the shared-memory shaders' single-workgroup reach:
+    // one workgroup per row, single dispatch, no scratch buffers
+    {
+        const uint32_t RADIX_WG = std::min<uint32_t>(1024, 1u << device->max_workgroup_size_log2);
+        ggml_vk_create_pipeline2(device, device->pipeline_topk_radix_f32, "topk_radix_f32", topk_radix_f32_len, topk_radix_f32_data, "main", 2, sizeof(vk_op_topk_push_constants), {RADIX_WG, 1, 1}, {RADIX_WG}, 1, true);
+    }
 
     ggml_vk_create_pipeline(device, device->pipeline_argmax_f32, "argmax_f32", argmax_f32_len, argmax_f32_data, "main", 2, sizeof(vk_op_push_constants), {1, 1, 1}, { device->subgroup_size }, 1);
 
@@ -14162,17 +14158,16 @@ static void ggml_vk_rope(ggml_backend_vk_context * ctx, vk_context& subctx, cons
         ggml_vk_make_rope_constants(cgraph->nodes[node_idx], src0, src2 != nullptr, backprop, set_rows_stride));
 }
 
-// Core of GGML_OP_ARGSORT's dispatch, parameterized on explicit subbuffers rather than
-// tensors so it can also drive the large-k top_k path's full-width scratch sort
-// (ggml_vk_topk_large below) - not just the real ARGSORT op's own dst tensor.
-static void ggml_vk_argsort_dispatch(
-        ggml_backend_vk_context * ctx, vk_context& subctx,
-        vk_subbuffer src0_buf, vk_subbuffer dst_buf,
-        uint32_t ncols, uint32_t nrows, uint32_t order) {
+static void ggml_vk_argsort(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
+    const uint32_t * op_params = (const uint32_t *)dst->op_params;
+
+    uint32_t ncols = src0->ne[0];
+    uint32_t nrows = ggml_nrows(src0);
+
     uint32_t ncols_pad_log2 = (uint32_t)ceilf(log2f(float(ncols)));
     uint32_t ncolsp2 = 1 << ncols_pad_log2;
 
-    vk_op_argsort_push_constants pc { ncols, ncolsp2, ncols_pad_log2, nrows, order, 0, 0, 0, 0, };
+    vk_op_argsort_push_constants pc { ncols, ncolsp2, ncols_pad_log2, nrows, op_params[0], 0, 0, 0, 0, };
 
     // Pick the largest workgroup size <= ncolsp2
     uint32_t pipeline_idx = std::min(ncols_pad_log2, num_argsort_pipelines - 1);
@@ -14184,6 +14179,8 @@ static void ggml_vk_argsort_dispatch(
     vk_pipeline pipeline = use_small ? ctx->device->pipeline_argsort_f32[pipeline_idx]
                                      : ctx->device->pipeline_argsort_large_f32[pipeline_idx];
 
+    vk_subbuffer src0_buf = ggml_vk_tensor_subbuffer(ctx, src0);
+    vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst);
     vk_subbuffer subbuf1 = dst_buf;
 
     // Reserve space for ivec2 per element, with rows padded to a power of two
@@ -14245,14 +14242,6 @@ static void ggml_vk_argsort_dispatch(
         }
         ctx->prealloc_x_need_sync = true;
     }
-}
-
-static void ggml_vk_argsort(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
-    const uint32_t * op_params = (const uint32_t *)dst->op_params;
-
-    ggml_vk_argsort_dispatch(ctx, subctx,
-            ggml_vk_tensor_subbuffer(ctx, src0), ggml_vk_tensor_subbuffer(ctx, dst),
-            (uint32_t)src0->ne[0], ggml_nrows(src0), op_params[0]);
 }
 
 // Tournament-reduction top_k, only correct while k fits a single workgroup's
@@ -14369,58 +14358,39 @@ static void ggml_vk_topk_small(ggml_backend_vk_context * ctx, vk_context& subctx
 // Large-k top_k: the tournament reduction above can only discard elements a
 // workgroup can see all of at once, so it can never make progress once k is
 // >= the max deployable workgroup size (~1024 on real hardware) - any element
-// in a smaller chunk could belong to the true global top-k. Route through a
-// full descending sort (GGML_OP_ARGSORT's already-correct, already-arbitrary-N
-// "large" path) into scratch, then truncate-copy the first k of each row into
-// the real (k-wide) destination.
+// in a smaller chunk could belong to the true global top-k. Radix selection
+// discards on a *global* bucket boundary instead, so it converges regardless
+// of the workgroup-size-vs-k relationship: one workgroup per row, a single
+// dispatch, no scratch buffers.
 static void ggml_vk_topk_large(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
     const uint32_t ncols = (uint32_t) src0->ne[0];
     const uint32_t nrows = (uint32_t) ggml_nrows(src0);
     const uint32_t k     = (uint32_t) dst->ne[0];
 
-    // Plain, unpadded ncols-wide int32 scratch for the full sorted-index result -
-    // the real dst tensor is only k columns wide, too narrow for argsort's output.
-    const size_t y_sz = size_t{ncols} * nrows * sizeof(int32_t);
-    if (ctx->prealloc_size_y < y_sz) {
-        ctx->prealloc_size_y = y_sz;
-        ggml_vk_preallocate_buffers(ctx, subctx);
-    }
-    if (ctx->prealloc_x_need_sync || ctx->prealloc_y_need_sync) {
-        ggml_vk_sync_buffers(ctx, subctx);
-    }
+    vk_pipeline pipeline = ctx->device->pipeline_topk_radix_f32;
+    GGML_ASSERT(pipeline != nullptr);
+
+    vk_op_topk_push_constants pc { ncols, ncols, ncols, k, nrows, 0, 0 };
 
     vk_subbuffer src0_buf = ggml_vk_tensor_subbuffer(ctx, src0);
-    vk_subbuffer scratch  = { ctx->prealloc_y, 0, y_sz };
+    vk_subbuffer dst_buf  = ggml_vk_tensor_subbuffer(ctx, dst);
 
-    ggml_vk_argsort_dispatch(ctx, subctx, src0_buf, scratch, ncols, nrows, GGML_SORT_ORDER_DESC);
+    // one workgroup per row
+    std::array<uint32_t, 3> elements = { nrows*pipeline->wg_denoms[0], 1, 1 };
 
-    // The argsort dispatch wrote prealloc_x (its own bitonic-network workspace)
-    // and prealloc_y (our scratch, standing in for its usual dst tensor).
-    ctx->prealloc_x_need_sync = true;
-    ctx->prealloc_y_need_sync = true;
-    // prealloc_y now holds raw sorted-index scratch, not whatever a coopmat2
-    // matmul may have cached there before - invalidate that cache tag so a
-    // later, unrelated matmul in this graph can't mistake our scratch for its
-    // still-valid cached fp16/q8 conversion (silent data corruption otherwise).
-    ctx->prealloc_y_last_pipeline_used = nullptr;
-    ctx->prealloc_y_last_tensor_used = nullptr;
-    ctx->prealloc_y_last_decode_vector_staging = false;
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src0_buf, dst_buf }, pc, elements);
+}
 
-    ggml_vk_sync_buffers(ctx, subctx);
-
-    vk_op_topk_copy_push_constants pc { ncols, k, nrows };
-    vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst);
-    std::array<uint32_t, 3> elements { k, std::min(nrows, ctx->device->properties.limits.maxComputeWorkGroupCount[1]), 1 };
-
-    vk_pipeline copy_pipeline = ctx->device->pipeline_topk_copy_i32;
-    ggml_pipeline_request_descriptor_sets(ctx, copy_pipeline, 1);
-    ggml_vk_dispatch_pipeline(ctx, subctx, copy_pipeline, { scratch, dst_buf }, pc, elements);
+// true when k fits a single-workgroup tournament pipeline; the index is only
+// valid to probe after the range check, hence the explicit ordering here
+static bool ggml_vk_topk_k_fits_pipeline(const vk_device_struct * device, uint32_t k) {
+    const uint32_t min_pipeline = (uint32_t) log2f(float(k)) + 1;
+    return min_pipeline < num_topk_pipelines && device->pipeline_topk_f32[min_pipeline] != nullptr;
 }
 
 static void ggml_vk_topk(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
-    const uint32_t k = (uint32_t) dst->ne[0];
-    const uint32_t min_pipeline = (uint32_t) log2f(float(k)) + 1;
-    if (min_pipeline < num_topk_pipelines && ctx->device->pipeline_topk_f32[min_pipeline]) {
+    if (ggml_vk_topk_k_fits_pipeline(ctx->device.get(), (uint32_t) dst->ne[0])) {
         ggml_vk_topk_small(ctx, subctx, src0, dst);
     } else {
         ggml_vk_topk_large(ctx, subctx, src0, dst);
@@ -19072,15 +19042,8 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 // as ggml_new_tensor_4d(..., k, a->ne[1], ...)), not the candidate pool
                 // width - ggml_vk_topk_small's multi-pass loop already handles arbitrarily
                 // large ncols correctly as long as k fits a single tournament pipeline.
-                uint32_t min_pipeline = (uint32_t)log2f(float(op->ne[0])) + 1;
-                if (min_pipeline < num_topk_pipelines && device->pipeline_topk_f32[min_pipeline]) {
-                    return true;
-                }
-                // k exceeds a single workgroup's tournament pipeline - the tournament
-                // reduction can't discard anything once a chunk is smaller than k, so
-                // only the large-k argsort-then-slice path (ggml_vk_topk_large) can serve
-                // this. Same feature gate as ARGSORT's own large path, just above.
-                return device->vulkan_memory_model;
+                // Beyond that, the radix path takes over, which has no extra requirements.
+                return true;
             }
         case GGML_OP_UPSCALE:
             if (op->op_params[0] & GGML_SCALE_FLAG_ANTIALIAS) {
