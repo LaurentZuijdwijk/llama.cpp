@@ -351,6 +351,13 @@ extern "C" {
         int32_t ple_io_threads; // parallel pread workers
         int32_t ple_cache_mb;   // in-memory cache of recently read rows, 0 disables
 
+        // load the n-gram hash-embedding table (per_layer_token_embd) from a separate GGUF
+        // instead of the main model file, so different tables can be swapped without
+        // requantizing the rest of the model. NULL: read the table from the main file, as
+        // before. Implies ple_on_disk (the whole point is testing tables without paying
+        // their VRAM/RAM cost). qwen4exp only.
+        const char * path_ple;
+
         // proportion of the model (layers or rows) to offload to each GPU, size: llama_max_devices()
         const float * tensor_split;
 

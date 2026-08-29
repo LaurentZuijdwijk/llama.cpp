@@ -2751,6 +2751,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_NGRAM_ON_DISK"));
     add_opt(common_arg(
+        {"--model-ple", "-mp"}, "FNAME",
+        "read the n-gram hash-embedding table (per_layer_token_embd) from this GGUF instead of\n"
+        "the main model file, so different tables can be tested without requantizing the rest\n"
+        "of the model. Implies --ngram-on-disk. qwen4exp only, joined table layout only\n"
+        "(default: read the table from the main model file)",
+        [](common_params & params, const std::string & value) {
+            params.path_ple = value;
+        }
+    ).set_env("LLAMA_ARG_MODEL_PLE"));
+    add_opt(common_arg(
         {"--ngram-io-threads"}, "N",
         string_format("threads reading n-gram rows for --ngram-on-disk (default: %d)", params.ple_io_threads),
         [](common_params & params, int value) {

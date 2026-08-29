@@ -3,6 +3,8 @@
 #include "llama-memory-hybrid-idx.h"
 #include "llama-memory-recurrent.h"
 #include "llama-ple-disk.h"
+#include "ggml-cpp.h"
+#include "gguf.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -134,7 +136,55 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
     // views either way, so build_ple does not care which layout it got.
     if (hparams.ple_n_heads > 0) {
         const std::string joined_name = tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight").str();
-        if (const auto * w = ml.get_weight(joined_name.c_str())) {
+        if (params.path_ple) {
+            // The table lives in its own GGUF, so different tables (precision, size, source)
+            // can be tried without requantizing the rest of the model. This only ever needs
+            // one tensor's shape, type and file offset, so read it with the raw GGUF API
+            // rather than standing up a second llama_model_loader for a whole file.
+            struct gguf_init_params gp = { /*.no_alloc =*/ true, /*.ctx =*/ nullptr };
+            gguf_context_ptr ctx_ple { gguf_init_from_file(params.path_ple, gp) };
+            if (!ctx_ple) {
+                throw std::runtime_error(format("--model-ple: failed to open '%s'", params.path_ple));
+            }
+
+            const int64_t tid = gguf_find_tensor(ctx_ple.get(), joined_name.c_str());
+            if (tid < 0) {
+                throw std::runtime_error(format("--model-ple: '%s' has no %s tensor "
+                                                "(the sidecar must use the joined table layout)",
+                                                params.path_ple, joined_name.c_str()));
+            }
+
+            const int64_t  * ne       = gguf_get_tensor_ne(ctx_ple.get(), tid);
+            const ggml_type   pe_type = gguf_get_tensor_type(ctx_ple.get(), tid);
+            const int64_t     ple_rows = ne[1];
+
+            if (ne[0] != (int64_t) hparams.ple_head_dim) {
+                throw std::runtime_error(format("--model-ple: row width %" PRId64 " in '%s' does not match "
+                                                "this model's PLE head dim %u", ne[0], params.path_ple, hparams.ple_head_dim));
+            }
+            for (uint32_t h = 0; h < hparams.ple_n_heads; ++h) {
+                if ((int64_t) hparams.ple_head_offsets[h] + hparams.ple_head_vocab_sizes[h] > ple_rows) {
+                    throw std::runtime_error(format("--model-ple: head %u range exceeds the %" PRId64 " rows in '%s'",
+                                                    h, ple_rows, params.path_ple));
+                }
+            }
+
+            const size_t offs = gguf_get_data_offset(ctx_ple.get()) + gguf_get_tensor_offset(ctx_ple.get(), tid);
+
+            llama_ple_disk::params dp;
+            dp.n_threads   = params.ple_io_threads;
+            dp.cache_bytes = params.ple_cache_mb > 0 ? (size_t) params.ple_cache_mb << 20 : 0;
+            dp.direct_io   = params.ple_direct_io;
+            ple_disk = std::make_shared<llama_ple_disk>(params.path_ple, offs, pe_type, ne[0], ple_rows, dp);
+            LLAMA_LOG_INFO("%s: PLE n-gram table read from sidecar '%s': %s\n",
+                            __func__, params.path_ple, ple_disk->describe().c_str());
+
+            // register with the main loader too, in case this file also happens to carry a
+            // copy: TENSOR_NOT_REQUIRED means it's fine either way, and TENSOR_SKIP means we
+            // never touch its bytes even if it's there
+            create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"), { hparams.ple_head_dim, ple_rows },
+                          TENSOR_SKIP | TENSOR_NOT_REQUIRED);
+        } else if (const auto * w = ml.get_weight(joined_name.c_str())) {
             const int64_t ple_rows = w->tensor->ne[1];
 
             // sanity check

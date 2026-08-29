@@ -578,6 +578,7 @@ struct common_params {
     bool    ple_direct_io  = true;  // ... read with O_DIRECT
     int32_t ple_io_threads = 64;    // ... parallel readers (random 4 KiB reads: this NVMe gives 62k IOPS at 16, 130k at 64, ~160k at 128+)
     int32_t ple_cache_mb   = 256;   // ... row cache, 0 disables
+    std::string path_ple   = "";    // read the table from this GGUF instead of the main model file
 
     bool single_turn       = false; // single turn chat conversation
 

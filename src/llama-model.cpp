@@ -2675,6 +2675,7 @@ llama_model_params llama_model_default_params() {
         /*.main_gpu                    =*/ 0,
         /*.ple_io_threads              =*/ 64,
         /*.ple_cache_mb                =*/ 256,
+        /*.path_ple                    =*/ nullptr,
         /*.tensor_split                =*/ nullptr,
         /*.progress_callback           =*/ nullptr,
         /*.progress_callback_user_data =*/ nullptr,
