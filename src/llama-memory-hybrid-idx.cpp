@@ -88,8 +88,13 @@ llama_memory_hybrid_idx::llama_memory_hybrid_idx(
 
             ggml_backend_buffer_type_t buft = nullptr;
             for (uint32_t il = 0; il < model.hparams.n_layer(); ++il) {
-                // the idx cache is filtered to the QSA layers; get_k_storage on any other layer is out of range
-                if (model.hparams.dsv4_compress_ratios[il] == 0) {
+                // The idx cache is built with filter_idx = !is_recr(il), so get_k_storage is only
+                // in range for those layers - match that predicate exactly rather than inferring the
+                // set from the compress ratios. A layer can be recurrent and still carry a nonzero
+                // ratio (synthetic models in test-llama-archs do exactly that), and querying it threw
+                // out_of_range from map_layer_ids.at(). The ratio test stays: pooled rows are only
+                // useful for layers the QSA indexer actually scores.
+                if (model.hparams.is_recr(il) || model.hparams.dsv4_compress_ratios[il] == 0) {
                     continue;
                 }
                 ggml_tensor * k = mem_idx->get_k_storage((int32_t) il);
