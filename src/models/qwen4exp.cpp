@@ -482,17 +482,8 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
             cur = build_layer_attn(inp->get_attn(), mctx_hyb, cur, inp_pos, sections, il);
         }
 
-        if (il == n_layer - 1) {
-            // Hand the wide residual to an MTP head, before the final mix collapses it. The
-            // draft reads every position, not just the ones this ubatch needs logits for, so
-            // this has to run before the inp_out_ids gather below narrows res_hc down to the
-            // output rows -- capturing res_hc after the loop (as the old code did) captured
-            // the already-gathered tensor instead, which silently produced zero rows whenever
-            // inp_out_ids was non-null and none of the positions needed logits.
-            res->t_h_nextn = res_hc;
-        }
-
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == n_layer - 1 && inp_out_ids &&
+                (!cparams.embeddings_nextn || cparams.embeddings_nextn_masked)) {
             // everything below is per token, so drop the rows that produce no output
             cur    = ggml_get_rows(ctx0, cur,    inp_out_ids);
             inject = ggml_get_rows(ctx0, inject, inp_out_ids);
@@ -518,6 +509,22 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
 
         // "l_last" is the layer output name that build_cvec and imatrix look for
         cb(res_hc, "l_last", il);
+    }
+
+    // Hand the wide residual to an MTP head once the last layer has folded its attention and
+    // FFN into it: the head was trained on the trunk's final residual, not on the last layer's
+    // input. The final mix below is the output norm of the LM head, so capture before it. An
+    // unmasked request wants every position, so the last layer ran uncropped above and the
+    // rows for the final mix are gathered only after this hand-over.
+    if (cparams.embeddings_nextn) {
+        res->t_h_nextn = res_hc;
+        cb(res->t_h_nextn, "h_nextn", -1);
+
+        if (!cparams.embeddings_nextn_masked && inp_out_ids) {
+            res_hc = ggml_reshape_2d(ctx0, res_hc, n_embd*hc, res_hc->ne[2]);
+            res_hc = ggml_get_rows(ctx0, res_hc, inp_out_ids);
+            res_hc = ggml_reshape_3d(ctx0, res_hc, n_embd, hc, res_hc->ne[1]);
+        }
     }
 
     // the final mixer is the output norm: there is no separate one
