@@ -332,6 +332,37 @@ public:
         }
     }
 
+    // like for_each_token_in, but visits cells newest-first (by index, which for
+    // append-only usage tracks recency) and stops as soon as the callback returns
+    // false. get_prev_tokens() only ever wants the last few predecessor tokens per
+    // sequence, so this turns what would be an O(used cells) scan of the whole cache
+    // into O(window size) for the common case, at the cost of only being a *hint*
+    // about recency: index order does not strictly guarantee position order (e.g.
+    // after defragmentation), so callers must still be correct if a cell arrives
+    // out of position order, just not required to be optimal for it.
+    template<typename F>
+    void for_each_token_in_reverse(const std::bitset<LLAMA_MAX_SEQ> & seqs, llama_pos p0, llama_pos p1, F && f) const {
+        for (auto it = used.rbegin(); it != used.rend(); ++it) {
+            const auto i = *it;
+            if (pos[i] < p0 || pos[i] >= p1) {
+                continue;
+            }
+
+            const auto m = seq[i] & seqs;
+            if (m.none()) {
+                continue;
+            }
+
+            for (llama_seq_id s = 0; s < LLAMA_MAX_SEQ; ++s) {
+                if (m.test(s)) {
+                    if (!f(s, pos[i], ext[i].tok)) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     // note: call only if the cell is not empty and the seq_id is not in the cell
     void seq_add(uint32_t i, llama_seq_id seq_id) {
         assert(i < pos.size());
