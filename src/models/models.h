@@ -1359,6 +1359,8 @@ struct llama_model_dflash : public llama_model_base {
     struct graph : public llm_graph_context {
         const llama_model & model;
 
+        void build_post_sampling() const override;
+
         graph(const llama_model & model, const llm_graph_params & params);
 
         ggml_tensor * build_inp_embd_enc() const;
