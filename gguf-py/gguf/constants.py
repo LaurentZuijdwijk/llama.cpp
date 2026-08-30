@@ -167,6 +167,7 @@ class Keys:
         SELECTOR_RANK                     = "{arch}.selector_rank"
         SELECTOR_TOP_K                    = "{arch}.selector_top_k"
         SAMPLE_FROM_ANCHOR                = "{arch}.sample_from_anchor"
+        HAS_CONFIDENCE_HEAD               = "{arch}.has_confidence_head"
         NORM_BEFORE_RESIDUAL              = "{arch}.norm_before_residual"
         NORM_BEFORE_FC                    = "{arch}.norm_before_fc"
 
@@ -232,7 +233,7 @@ class Keys:
         # absent means the mix projection is full rank (DeepSeek-V4 behaviour)
         LOW_RANK             = "{arch}.hyper_connection.low_rank"
 
-    class PLE:
+    class PerLayerEmbedding:
         LAYERS             = "{arch}.ple.layers"
         NGRAM_SIZE         = "{arch}.ple.ngram_size"
         HEADS_PER_NGRAM    = "{arch}.ple.heads_per_ngram"
@@ -1957,13 +1958,13 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.DSPARK_MARKOV_W1:          "markov_w1",
     MODEL_TENSOR.DSPARK_MARKOV_W2:          "markov_w2",
     MODEL_TENSOR.DSPARK_CONF_PROJ:          "conf_proj",
-    MODEL_TENSOR.DFLASH_ATTN_CONV_BASE:      "blk.{bid}.attn_conv_base",
-    MODEL_TENSOR.DFLASH_ATTN_CONV_PROJ:      "blk.{bid}.attn_conv_proj",
-    MODEL_TENSOR.DFLASH_FFN_CONV_BASE:       "blk.{bid}.ffn_conv_base",
-    MODEL_TENSOR.DFLASH_FFN_CONV_PROJ:       "blk.{bid}.ffn_conv_proj",
-    MODEL_TENSOR.DFLASH_SELECTOR_PREV:       "selector_predecessor",
-    MODEL_TENSOR.DFLASH_SELECTOR_NEXT:       "selector_successor",
-    MODEL_TENSOR.DFLASH_SELECTOR_HIDDEN:     "selector_hidden",
+    MODEL_TENSOR.DFLASH_ATTN_CONV_BASE:     "blk.{bid}.attn_conv_base",
+    MODEL_TENSOR.DFLASH_ATTN_CONV_PROJ:     "blk.{bid}.attn_conv_proj",
+    MODEL_TENSOR.DFLASH_FFN_CONV_BASE:      "blk.{bid}.ffn_conv_base",
+    MODEL_TENSOR.DFLASH_FFN_CONV_PROJ:      "blk.{bid}.ffn_conv_proj",
+    MODEL_TENSOR.DFLASH_SELECTOR_PREV:      "selector_predecessor",
+    MODEL_TENSOR.DFLASH_SELECTOR_NEXT:      "selector_successor",
+    MODEL_TENSOR.DFLASH_SELECTOR_HIDDEN:    "selector_hidden",
     MODEL_TENSOR.D2T:                       "d2t",
 }
 
@@ -2908,6 +2909,7 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_UP_EXP,
         MODEL_TENSOR.FFN_GATE_EXP,
         MODEL_TENSOR.FFN_GATE_UP_EXP,
+        MODEL_TENSOR.PER_LAYER_TOKEN_EMBD,
         MODEL_TENSOR.PLE_NGRAM_EMBD,
         MODEL_TENSOR.NEXTN_EH_PROJ,
         MODEL_TENSOR.NEXTN_ENORM,
