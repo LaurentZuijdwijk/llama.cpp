@@ -40,22 +40,6 @@ const char * llama_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q1_0:      name = LLAMA_FTYPE_PREFIX "Q1_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q2_0:      name = LLAMA_FTYPE_PREFIX "Q2_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q4_0:      name = LLAMA_FTYPE_PREFIX "Q4_0"; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4:          name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4"; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_LEAN:     name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_LEAN"; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_COHERENT: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_COHERENT"; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST:     name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_FAST"; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST_COHERENT: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_FAST_COHERENT"; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX:    name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_STRIX"; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX_LEAN: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_STRIX_LEAN"; break;
-        case LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX:            name = LLAMA_FTYPE_PREFIX "Q3_0_ROCMFPX"; break;
-        case LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPX:            name = LLAMA_FTYPE_PREFIX "Q2_0_ROCMFPX"; break;
-        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX:            name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX"; break;
-        case LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX:            name = LLAMA_FTYPE_PREFIX "Q8_0_ROCMFPX"; break;
-        case LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX_AGENT:      name = LLAMA_FTYPE_PREFIX "Q3_0_ROCMFPX_AGENT"; break;
-        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_AGENT:      name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX_AGENT"; break;
-        case LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX_AGENT:      name = LLAMA_FTYPE_PREFIX "Q8_0_ROCMFPX_AGENT"; break;
-        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_LEAN:       name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX_LEAN"; break;
-        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_AGENT_LEAN: name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX_AGENT_LEAN"; break;
         case LLAMA_FTYPE_MOSTLY_Q4_1:      name = LLAMA_FTYPE_PREFIX "Q4_1"; break;
         case LLAMA_FTYPE_MOSTLY_Q5_0:      name = LLAMA_FTYPE_PREFIX "Q5_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q5_1:      name = LLAMA_FTYPE_PREFIX "Q5_1"; break;
@@ -86,6 +70,22 @@ const char * llama_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_IQ4_XS:    name = LLAMA_FTYPE_PREFIX "IQ4_XS - 4.25 bpw"; break;
         case LLAMA_FTYPE_MOSTLY_IQ3_S:     name = LLAMA_FTYPE_PREFIX "IQ3_S - 3.4375 bpw"; break;
         case LLAMA_FTYPE_MOSTLY_IQ3_M:     name = LLAMA_FTYPE_PREFIX "IQ3_S mix - 3.66 bpw"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4:          name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_LEAN:     name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_LEAN"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_COHERENT: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_COHERENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST:     name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_FAST"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST_COHERENT: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_FAST_COHERENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX:    name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_STRIX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX_LEAN: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_STRIX_LEAN"; break;
+        case LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX:            name = LLAMA_FTYPE_PREFIX "Q3_0_ROCMFPX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPX:            name = LLAMA_FTYPE_PREFIX "Q2_0_ROCMFPX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX:            name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX:            name = LLAMA_FTYPE_PREFIX "Q8_0_ROCMFPX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX_AGENT:      name = LLAMA_FTYPE_PREFIX "Q3_0_ROCMFPX_AGENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_AGENT:      name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX_AGENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX_AGENT:      name = LLAMA_FTYPE_PREFIX "Q8_0_ROCMFPX_AGENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_LEAN:       name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX_LEAN"; break;
+        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_AGENT_LEAN: name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX_AGENT_LEAN"; break;
         default:                           name = LLAMA_FTYPE_PREFIX "unknown, may not work"; break;
     }
     return (ftype & LLAMA_FTYPE_GUESSED) ? name : name + guessed_prefix_len;
@@ -768,12 +768,6 @@ llama_model_loader::llama_model_loader(
             case GGML_TYPE_F16:     ftype = LLAMA_FTYPE_MOSTLY_F16;     break;
             case GGML_TYPE_BF16:    ftype = LLAMA_FTYPE_MOSTLY_BF16;    break;
             case GGML_TYPE_Q4_0:    ftype = LLAMA_FTYPE_MOSTLY_Q4_0;    break;
-            case GGML_TYPE_Q4_0_ROCMFP4:      ftype = LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4;      break;
-            case GGML_TYPE_Q4_0_ROCMFP4_FAST: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST; break;
-            case GGML_TYPE_Q3_0_ROCMFPX:      ftype = LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX;      break;
-            case GGML_TYPE_Q2_0_ROCMFPX:      ftype = LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPX;      break;
-            case GGML_TYPE_Q6_0_ROCMFPX:      ftype = LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX;      break;
-            case GGML_TYPE_Q8_0_ROCMFPX:      ftype = LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX;      break;
             case GGML_TYPE_Q4_1:    ftype = LLAMA_FTYPE_MOSTLY_Q4_1;    break;
             case GGML_TYPE_Q5_0:    ftype = LLAMA_FTYPE_MOSTLY_Q5_0;    break;
             case GGML_TYPE_Q5_1:    ftype = LLAMA_FTYPE_MOSTLY_Q5_1;    break;
@@ -797,6 +791,12 @@ llama_model_loader::llama_model_loader(
             case GGML_TYPE_NVFP4:   ftype = LLAMA_FTYPE_MOSTLY_NVFP4;   break;
             case GGML_TYPE_Q1_0:    ftype = LLAMA_FTYPE_MOSTLY_Q1_0;    break;
             case GGML_TYPE_Q2_0:    ftype = LLAMA_FTYPE_MOSTLY_Q2_0;    break;
+            case GGML_TYPE_Q4_0_ROCMFP4:      ftype = LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4;      break;
+            case GGML_TYPE_Q4_0_ROCMFP4_FAST: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST; break;
+            case GGML_TYPE_Q3_0_ROCMFPX:      ftype = LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX;      break;
+            case GGML_TYPE_Q2_0_ROCMFPX:      ftype = LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPX;      break;
+            case GGML_TYPE_Q6_0_ROCMFPX:      ftype = LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX;      break;
+            case GGML_TYPE_Q8_0_ROCMFPX:      ftype = LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX;      break;
             default:
                 {
                     LLAMA_LOG_WARN("%s: unknown type %s\n", __func__, ggml_type_name(type_max));
@@ -1095,11 +1095,52 @@ static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hpara
     return nullptr;
 }
 
+ggml_backend_buffer_type_t llama_model_loader::lazy_read::buft() {
+    auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (!cpu_dev) {
+        throw std::runtime_error("no CPU backend found");
+    }
+    return ggml_backend_dev_buffer_type(cpu_dev);
+}
+
+bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_tensor * t, const llama_tensor_weight * w) {
+    if (mode == LLAMA_LAZY_MODE_OFF) {
+        return false;
+    }
+
+    // do not lazy-read small tensors, it has significant overhead and is not worth it
+    constexpr size_t auto_min_size = 4ull * 1024 * 1024 * 1024;
+    if (mode != LLAMA_LAZY_MODE_ON && ggml_nbytes(t) <= auto_min_size) {
+        return false;
+    }
+
+    if (!llama_mmap::SUPPORTED) {
+        LLAMA_LOG_WARN("%s: mmap is not available, so tensor %s (size = %zu MiB) is loaded into RAM in full\n",
+                __func__, name.c_str(), ggml_nbytes(t)/1024/1024);
+        return false;
+    }
+
+    if (w) {
+        ranges[w->idx].emplace_back(w->offs, w->offs + ggml_nbytes(t));
+        tensors.insert(name);
+
+        LLAMA_LOG_INFO("%s: tensor %s (size = %zu MiB) lazy read enabled\n",
+                __func__, name.c_str(), ggml_nbytes(t)/1024/1024);
+    }
+
+    return true;
+}
+
 struct ggml_tensor * llama_model_loader::create_tensor(
         const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
+    // set below, before buft_for_tensor() runs
+    bool is_lazy = false;
+
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
-        auto it = ctx_map.find(buft);
+        const ctx_key key { buft, is_lazy };
+
+        auto it = ctx_map.find(key);
         if (it == ctx_map.end()) {
             // one ggml context per buffer type
             int max_n_tensors = n_tensors;
@@ -1121,7 +1162,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
                 throw std::runtime_error(format("failed to create ggml context"));
             }
 
-            ctx_map.emplace(buft, ctx);
+            ctx_map.emplace(key, ctx);
 
             return ctx;
         }
@@ -1183,6 +1224,10 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             if (tn.bid == -1) {
                 GGML_ABORT("repeating layer tensor %s used without a layer number", tn.str().c_str());
             }
+        }
+
+        if (is_lazy) {
+            return lazy_read::buft();
         }
 
         // select the buffer type for this tensor
@@ -1312,16 +1357,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return NULL;
     }
 
-    if ((flags & TENSOR_READ_LAZY) && use_mmap && tensor_read_lazy != LLAMA_TENSOR_READ_LAZY_OFF) {
-        // in auto mode, small tensors are cheap enough to keep resident
-        constexpr size_t auto_lazy_min_size = 4ull * 1024 * 1024 * 1024;
-        if (tensor_read_lazy == LLAMA_TENSOR_READ_LAZY_ON || ggml_nbytes(cur) > auto_lazy_min_size) {
-            const auto & w = require_weight(tn.str().c_str());
-            lazy_tensor_ranges[w.idx].emplace_back(w.offs, w.offs + ggml_nbytes(cur));
-
-            LLAMA_LOG_INFO("%s: tensor %s (size = %zu MiB) lazy read enabled\n",
-                    __func__, tn.str().c_str(), ggml_nbytes(cur)/1024/1024);
-        }
+    if (flags & TENSOR_READ_LAZY) {
+        // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
+        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
     }
 
     ggml_tensor t_meta = *cur;
@@ -1388,7 +1426,8 @@ void llama_model_loader::done_getting_tensors(bool partial) const {
 }
 
 void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps) {
-    if (use_mmap) {
+    // note: read_lazy also requires mmap; this condition make sure it's usable even when --load-mode is not set to mmap
+    if (use_mmap || lazy.any()) {
         mappings.reserve(files.size());
         mmaps_used.reserve(files.size());
         for (uint32_t idx = 0; idx < files.size(); idx++) {
@@ -1405,11 +1444,10 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
                 }
             }
 
-            const auto it_lazy = lazy_tensor_ranges.find(idx);
-            static const llama_mmap::ranges no_lazy_ranges;
+            const size_t prefetch_size = prefetch && use_mmap ? -1 : 0;
 
-            std::unique_ptr<llama_mmap> mapping = std::make_unique<llama_mmap>(file.get(), prefetch ? -1 : 0, is_numa,
-                    it_lazy != lazy_tensor_ranges.end() ? it_lazy->second : no_lazy_ranges);
+            std::unique_ptr<llama_mmap> mapping = std::make_unique<llama_mmap>(file.get(), prefetch_size, is_numa,
+                    lazy.for_file(idx));
             mmaps_used.emplace_back(mapping->size(), 0);
             if (mlock_mmaps) {
                 std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());
@@ -1600,7 +1638,9 @@ bool llama_model_loader::load_all_data(
 
         size_t n_size = ggml_nbytes(cur);
 
-        if (use_mmap) {
+        const bool from_mapping = use_mmap || lazy.has(cur);
+
+        if (from_mapping) {
             const auto & mapping = mappings.at(weight->idx);
             ggml_backend_buffer_t buf_mmap = nullptr;
             if (bufs.count(weight->idx)) {
@@ -1617,7 +1657,9 @@ bool llama_model_loader::load_all_data(
             GGML_ASSERT(buf_mmap || cur->data); // either we have a buffer to allocate the tensor in, or it is already allocated
             if (buf_mmap && cur->data == nullptr) {
                 ggml_backend_tensor_alloc(buf_mmap, cur, data);
-                if (lmlocks) {
+
+                // locking a lazy tensor would fault all of it in, which is what lazy avoids
+                if (lmlocks && !lazy.has(cur)) {
                     const auto & lmlock = lmlocks->at(weight->idx);
                     lmlock->grow_to(weight->offs + n_size);
                 }

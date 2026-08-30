@@ -43,10 +43,10 @@
 #define LLAMA_FILE_MAGIC_GGSQ 0x67677371u // 'ggsq'
 
 #define LLAMA_SESSION_MAGIC   LLAMA_FILE_MAGIC_GGSN
-#define LLAMA_SESSION_VERSION 9
+#define LLAMA_SESSION_VERSION 10
 
 #define LLAMA_STATE_SEQ_MAGIC   LLAMA_FILE_MAGIC_GGSQ
-#define LLAMA_STATE_SEQ_VERSION 2
+#define LLAMA_STATE_SEQ_VERSION 3
 
 #ifdef __cplusplus
 extern "C" {
@@ -157,6 +157,7 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q1_0          = 40, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q2_0          = 41, // except 1d tensors
 
+
         // ROCmFPx experimental AMD-native recipes (high ID range, see ggml_ftype)
         LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4          = 100, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_LEAN     = 101, // ROCmFP4 with Q5_K token embeddings
@@ -235,10 +236,10 @@ extern "C" {
     LLAMA_API const char * llama_load_mode_name(enum llama_load_mode load_mode);
     LLAMA_API enum llama_load_mode llama_load_mode_from_str(const char * str);
 
-    enum llama_tensor_read_lazy {
-        LLAMA_TENSOR_READ_LAZY_OFF  = 0, // always read the whole tensor up front
-        LLAMA_TENSOR_READ_LAZY_AUTO = 1, // lazy only for marked tensors larger than 4 GiB (requires mmap)
-        LLAMA_TENSOR_READ_LAZY_ON   = 2, // read the rows of tensors marked by the arch on demand (requires mmap)
+    enum llama_lazy_mode {
+        LLAMA_LAZY_MODE_OFF  = 0, // always read the whole tensor up front
+        LLAMA_LAZY_MODE_AUTO = 1, // lazy only for marked tensors larger than 4 GiB (requires mmap)
+        LLAMA_LAZY_MODE_ON   = 2, // read the rows of tensors marked by the arch on demand (requires mmap)
     };
 
     enum llama_context_type {
@@ -342,10 +343,7 @@ extern "C" {
         enum llama_split_mode split_mode; // how to split the model across multiple GPUs
         enum llama_load_mode  load_mode;  // how to load the model
 
-        enum llama_tensor_read_lazy tensor_read_lazy; // on-demand reading of tensors marked by the arch
-
-        // the GPU that is used for the entire model when split_mode is LLAMA_SPLIT_MODE_NONE
-        int32_t main_gpu;
+        enum llama_lazy_mode lazy_mode; // on-demand reading of tensors marked by the arch
 
         // n-gram hash-embedding table kept on disk (see ple_on_disk below)
         int32_t ple_io_threads; // parallel pread workers
@@ -357,6 +355,9 @@ extern "C" {
         // before. Implies ple_on_disk (the whole point is testing tables without paying
         // their VRAM/RAM cost). qwen4exp only.
         const char * path_ple;
+
+        // the GPU that is used for the entire model when split_mode is LLAMA_SPLIT_MODE_NONE
+        int32_t main_gpu;
 
         // proportion of the model (layers or rows) to offload to each GPU, size: llama_max_devices()
         const float * tensor_split;
@@ -480,6 +481,7 @@ extern "C" {
         const struct llama_model_kv_override * kv_overrides;        // pointer to kv overrides
         const struct llama_model_tensor_override * tt_overrides;    // pointer to tensor overrides
         const int32_t * prune_layers;                               // pointer to layer indices to prune
+        size_t max_buf_size;                                        // max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
     } llama_model_quantize_params;
 
     typedef struct llama_logit_bias {
