@@ -640,8 +640,14 @@ void llama_memory_hybrid_idx_context::set_input_qsa(
             auto & w = mem->pooled_valid(seq_of_stream);
             w = std::min(w, n_complete);
 
-            const int64_t n_dirty = n_complete - w;
-            GGML_ASSERT(n_dirty <= n_dirty_max && "dirty tables sized at graph build; see qsa_pooled_n_dirty_max");
+            // qsa_pooled_n_dirty_max sized these tables at graph build from the ubatch's own
+            // positions; here we recount n_complete from the cells that are actually filled.
+            // Speculative decoding can leave drafted cells past the ubatch's q_max, so the
+            // fill-time count can exceed the build-time bound. Write what fits and leave the
+            // watermark short - the next ubatch repools the rest through the same pending-refill
+            // path a state load uses, and the rows left behind stay masked by the -inf bias
+            // meanwhile. When the counts agree this is exactly the old behaviour.
+            const int64_t n_dirty = std::min<int64_t>(n_complete - w, n_dirty_max);
 
             for (int64_t i = 0; i < n_dirty_max; ++i) {
                 const bool    live = i < n_dirty;
@@ -656,7 +662,7 @@ void llama_memory_hybrid_idx_context::set_input_qsa(
                 }
             }
 
-            w = n_complete;
+            w += n_dirty;
         }
 
         for (int64_t ii = 0; ii < n_tps; ++ii) {
