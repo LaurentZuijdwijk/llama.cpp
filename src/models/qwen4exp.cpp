@@ -536,7 +536,8 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
             cur = build_layer_attn(inp->get_attn(), mctx_hyb, cur, inp_pos, sections, il);
         }
 
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == n_layer - 1 && inp_out_ids &&
+                (!cparams.embeddings_nextn || cparams.embeddings_nextn_masked)) {
             // everything below is per token, so drop the rows that produce no output
             cur    = ggml_get_rows(ctx0, cur,    inp_out_ids);
             inject = ggml_get_rows(ctx0, inject, inp_out_ids);
@@ -564,11 +565,25 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
         cb(res_hc, "l_last", il);
     }
 
-    // Hand the wide residual to an MTP head, before the final mix collapses it. The draft
-    // reads all hc streams, which is what its hnorm is sized for. res_hc is passed as is
-    // rather than reshaped: a bare view is not a node the scheduler places, and the
-    // extraction is a flat copy, for which [n_embd, hc, T] and [hc*n_embd, T] are identical.
-    res->t_h_nextn = res_hc;
+    // Hand the wide residual to an MTP head once the last layer has folded its attention and
+    // FFN into it: the head was trained on the trunk's final residual, not on the last layer's
+    // input. The final mix below is the output norm of the LM head, so capture before it. The
+    // draft reads all hc streams, which is what its hnorm is sized for. res_hc is passed as is
+    // rather than reshaped: a bare view is not a node the scheduler places, and the extraction
+    // is a flat copy, for which [n_embd, hc, T] and [hc*n_embd, T] are identical.
+    //
+    // An unmasked request wants every position, so the last layer ran uncropped above and the
+    // rows for the final mix are gathered only after this hand-over.
+    if (cparams.embeddings_nextn) {
+        res->t_h_nextn = res_hc;
+        cb(res->t_h_nextn, "h_nextn", -1);
+
+        if (!cparams.embeddings_nextn_masked && inp_out_ids) {
+            res_hc = ggml_reshape_2d(ctx0, res_hc, n_embd*hc, res_hc->ne[2]);
+            res_hc = ggml_get_rows(ctx0, res_hc, inp_out_ids);
+            res_hc = ggml_reshape_3d(ctx0, res_hc, n_embd, hc, res_hc->ne[1]);
+        }
+    }
 
     // the final mixer is the output norm: there is no separate one
     ggml_tensor * cur = build_hc_mix(res_hc,
