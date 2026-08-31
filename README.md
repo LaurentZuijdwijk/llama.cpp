@@ -112,7 +112,7 @@ upstreamable and is the single biggest win in this fork.
 | Component | Status |
 |---|---|
 | **Adaptive speculation** -- `--spec-draft-adaptive`, MTP or DFlash2 | New here. Draft length tracks accepted tokens; `n_max` is a ceiling. Recommended: `--spec-draft-adaptive --spec-draft-n-min 3` |
-| **ROCmFPx quant types** — Q4\_0\_ROCMFP4, \_FAST, Q2/Q3/Q6/Q8\_0\_ROCMFPX, CPU codecs + Vulkan dequant / mat-vec / matmul / integer-dot kernels | Hand-ported from ciru-ai/ROCmFPX. Two decode bugs fixed here — see `ROCMFPX-NOTES.md` |
+| **ROCmFPx quant types** — Q4\_0\_ROCMFP4, \_FAST, Q2/Q3/Q6/Q8\_0\_ROCMFPX, CPU codecs + Vulkan dequant / mat-vec / matmul / integer-dot kernels | Hand-ported from ciru-ai/ROCmFPX, a fork of charlie12345/ROCmFPX where the ROCmFP4 format originates. Two decode bugs fixed here — see `ROCMFPX-NOTES.md` |
 | **Vulkan batched mat-vec fixes** — IQ3\_S register spill at `NUM_COLS > 4` (5× at n=8), ROCmFPx batch 3–8 rework | New here. Both upstreamable |
 | **Vulkan LDS stride fix** — `SHMEM_STRIDE` pad, +7.3 % prefill on any quant, +10–20 % at the kernel | New here. One constant. Upstreamable. Now driver-gated, see below |
 | **Vulkan prefill gates** — tiled concat-transpose, f16 B operand for quantized matmul and matmul\_id | Ported from [Nathanw1014/llama.cpp](https://github.com/Nathanw1014/llama.cpp/tree/strix-halo-vulkan). Re-measured here, see [`bench/`](bench/) |
@@ -610,8 +610,11 @@ The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-or
 
 Fork-specific, on top of upstream llama.cpp:
 
-- [ciru-ai/ROCmFPX](https://github.com/ciru-ai/ROCmFPX) - the ROCmFPx quant formats and reference
-  codecs. Hand-ported here (that tree shares no git history with llama.cpp, so it cannot be merged).
+- [charlie12345/ROCmFPX](https://github.com/charlie12345/ROCmFPX) - the origin of the ROCmFPx
+  project and the creator of the ROCmFP4 format. MIT licensed.
+- [ciru-ai/ROCmFPX](https://github.com/ciru-ai/ROCmFPX) - a fork of the above, and the tree the
+  ROCmFPx quant formats and reference codecs here were hand-ported from (it shares no git history
+  with llama.cpp, so it cannot be merged). MIT licensed.
 - [Jian Chen](https://github.com/ggml-org/llama.cpp/pull/27342) - DFlash2 speculative decoding,
   PR #27342. This fork carried it before it merged upstream.
 - [Nathanw1014/llama.cpp](https://github.com/Nathanw1014/llama.cpp/tree/strix-halo-vulkan) - the

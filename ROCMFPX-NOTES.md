@@ -20,7 +20,9 @@ Nothing is pushed. `git reset --hard <merge>` undoes any of them.
 
 ## ROCmFPx types
 
-Ported from https://github.com/ciru-ai/ROCmFPX. That fork shares **no git history**
+Ported from https://github.com/ciru-ai/ROCmFPX, itself a fork of
+https://github.com/charlie12345/ROCmFPX, where the ROCmFP4 format originates.
+That fork shares **no git history**
 with ggml-org/llama.cpp (different root commit) and sits on an older base, so it can
 only ever be hand-ported. A whole-tree merge would delete ~819 newer upstream files
 including all of `tools/ui`. Do not attempt it.
