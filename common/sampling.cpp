@@ -593,6 +593,8 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
         LOG_INF("%s: unaccounted time = %10.2f ms / %5.1f %%      (total - sampling - prompt eval - eval) / (total)\n", __func__, t_unacc_ms, t_unacc_pc);
         LOG_INF("%s:    graphs reused = %10d\n", __func__, data.n_reused);
 
+        llama_perf_context_print_phases(ctx);
+
         common_memory_breakdown_print(ctx);
     }
 }

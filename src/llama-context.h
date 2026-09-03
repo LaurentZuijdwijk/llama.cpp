@@ -188,6 +188,9 @@ struct llama_context {
     llama_perf_context_data perf_get_data() const;
     void perf_reset();
 
+    // wall-clock breakdown of decode(), only when LLAMA_PERF_PHASES is set
+    void perf_print_phases() const;
+
     llama_memory_breakdown memory_breakdown() const;
 
     //
@@ -392,4 +395,22 @@ private:
     mutable int32_t n_eval   = 0; // number of eval calls
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
+
+    // env: LLAMA_PERF_PHASES - wall-clock breakdown of decode(), printed by llama_perf_context_print
+    // index 0 is a decode ubatch (one token), index 1 is a prefill ubatch (more than one)
+    struct perf_phases {
+        int64_t t_memory_us     [2] = {0, 0}; // pending shifts/copies before the ubatch loop
+        int64_t t_graph_build_us[2] = {0, 0};
+        int64_t t_graph_alloc_us[2] = {0, 0};
+        int64_t t_set_inputs_us [2] = {0, 0};
+        int64_t t_submit_us     [2] = {0, 0}; // graph_compute call, async: does not include GPU time
+        int64_t t_output_us     [2] = {0, 0}; // logits/embd/sampler readback requests
+        int64_t t_sync_us       [2] = {0, 0}; // waiting for the backend, so this holds the GPU time
+        int64_t n_ubatch        [2] = {0, 0};
+        int64_t n_reuse         [2] = {0, 0}; // ubatches that skipped build+alloc
+    };
+
+    bool perf_phases_enabled = false;
+
+    mutable perf_phases perf_ph;
 };

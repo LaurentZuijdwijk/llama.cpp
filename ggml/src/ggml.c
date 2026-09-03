@@ -1827,6 +1827,28 @@ static struct ggml_object * ggml_new_object(struct ggml_context * ctx, enum ggml
     return obj_new;
 }
 
+// profiling region and phase - see ggml_perf_region_set in ggml.h
+static _Thread_local const char * g_perf_region = NULL;
+static _Thread_local const char * g_perf_phase  = NULL;
+
+const char * ggml_perf_region_set(const char * name) {
+    const char * prev = g_perf_region;
+    g_perf_region = name;
+    return prev;
+}
+
+const char * ggml_perf_region_get(void) {
+    return g_perf_region;
+}
+
+void ggml_perf_phase_set(const char * name) {
+    g_perf_phase = name;
+}
+
+const char * ggml_perf_phase_get(void) {
+    return g_perf_phase;
+}
+
 static struct ggml_tensor * ggml_new_tensor_impl(
         struct ggml_context * ctx,
         enum   ggml_type      type,
@@ -1884,7 +1906,7 @@ static struct ggml_tensor * ggml_new_tensor_impl(
         /*.data         =*/ obj_alloc_size > 0 ? (void *)(result + 1) : data,
         /*.name         =*/ { 0 },
         /*.extra        =*/ NULL,
-        /*.padding      =*/ { 0 },
+        /*.perf_region  =*/ g_perf_region,
     };
 
     // TODO: this should not be needed as long as we don't rely on aligned SIMD loads

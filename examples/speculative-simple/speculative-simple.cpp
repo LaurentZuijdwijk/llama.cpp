@@ -372,6 +372,9 @@ int main(int argc, char ** argv) {
     LOG_INF("\n");
     LOG_INF("draft:\n\n");
     common_speculative_print_stats(spec);
+    if (ctx_dft) {
+        llama_perf_context_print(ctx_dft);
+    }
 
     LOG_INF("\n");
     LOG_INF("target:\n\n");

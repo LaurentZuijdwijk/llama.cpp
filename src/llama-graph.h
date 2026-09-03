@@ -766,6 +766,23 @@ public:
 // callback that allows us to apply custom logic to each tensor (e.g. ggml-alloc, offloading, etc.)
 using llm_graph_cb = std::function<void(const llama_ubatch & ubatch, ggml_tensor * cur, const char * name, int il)>;
 
+// Tags every tensor built inside the scope with a region name, so a backend profiler can report
+// its per-node timings per model part instead of per op. Use the LLM_PERF_REGION macro.
+// The name must be a string literal: the tag is a bare pointer that has to outlive the graph.
+struct llm_perf_region_scope {
+    llm_perf_region_scope(const char * name) : prev(ggml_perf_region_set(name)) {}
+    ~llm_perf_region_scope() { ggml_perf_region_set(prev); }
+
+    llm_perf_region_scope(const llm_perf_region_scope &) = delete;
+    llm_perf_region_scope & operator=(const llm_perf_region_scope &) = delete;
+
+    const char * prev;
+};
+
+#define LLM_PERF_REGION_CAT2(a, b) a ## b
+#define LLM_PERF_REGION_CAT(a, b) LLM_PERF_REGION_CAT2(a, b)
+#define LLM_PERF_REGION(name) llm_perf_region_scope LLM_PERF_REGION_CAT(perf_region_, __LINE__)(name)
+
 class llm_graph_result;
 
 struct llm_graph_params {

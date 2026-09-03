@@ -721,7 +721,9 @@ extern "C" {
 
         void * extra; // extra things e.g. for ggml-cuda.cu
 
-        char padding[8];
+        // profiling tag, set from the current region at creation time - see ggml_perf_region_set
+        // this takes the place of the old trailing padding, so the struct size does not change
+        const char * perf_region;
     };
 
     static const size_t GGML_TENSOR_SIZE = sizeof(struct ggml_tensor);
@@ -896,6 +898,17 @@ extern "C" {
     GGML_API struct ggml_tensor * ggml_set_name   (      struct ggml_tensor * tensor, const char * name);
     GGML_ATTRIBUTE_FORMAT(2, 3)
     GGML_API struct ggml_tensor * ggml_format_name(      struct ggml_tensor * tensor, const char * fmt, ...);
+
+    // Profiling regions
+    //
+    // Every tensor made while a region is active keeps a pointer to that region name, so a
+    // backend can group its per-node timings by the part of the model that built the node.
+    // The names must outlive the graph - pass string literals. Both values are per thread.
+    // The phase is a second, independent axis: the caller sets it to tell prefill from decode.
+    GGML_API const char * ggml_perf_region_set(const char * name); // returns the previous region
+    GGML_API const char * ggml_perf_region_get(void);
+    GGML_API void         ggml_perf_phase_set(const char * name);
+    GGML_API const char * ggml_perf_phase_get(void);
 
     // Tensor flags
     GGML_API void ggml_set_input(struct ggml_tensor * tensor);

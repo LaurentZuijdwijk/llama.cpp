@@ -2166,6 +2166,8 @@ std::mutex vk_memory_logger::log_mutex;
 
 static bool vk_perf_logger_enabled = false;
 static bool vk_perf_logger_concurrent = false;
+// print only the per-region table, not the per-op one
+static bool vk_perf_logger_regions_only = false;
 static bool vk_enable_sync_logger = false;
 // number of calls between perf logger prints
 static uint32_t vk_perf_logger_frequency = 1;
@@ -2236,7 +2238,7 @@ static void ggml_vk_print_device_lost_info(const vk_device& device) {
 class vk_perf_logger {
   public:
     void print_timings(bool force = false) {
-        if (timings.empty()) {
+        if (timings.empty() && regions.empty()) {
             return;
         }
         print_count++;
@@ -2245,7 +2247,9 @@ class vk_perf_logger {
         }
         print_count = 0;
         uint64_t total_all_op_times = 0;
-        std::cerr << "----------------\nVulkan Timings:" << std::endl;
+        if (!timings.empty()) {
+            std::cerr << "----------------\nVulkan Timings:" << std::endl;
+        }
         for (const auto & t : timings) {
             uint64_t total_op_times = 0;
             for (const auto & time : t.second) {
@@ -2276,8 +2280,50 @@ class vk_perf_logger {
             std::cerr << "Total time: " << total_all_op_times / 1000.0 << " us." << std::endl;
         }
 
+        print_regions();
+
         timings.clear();
         flops.clear();
+        regions.clear();
+    }
+
+    // one line per (phase, region), longest first, so the hot part of the model is on top
+    void print_regions() {
+        if (regions.empty()) {
+            return;
+        }
+
+        uint64_t total = 0;
+        for (const auto & r : regions) {
+            total += r.second.time;
+        }
+
+        using region_entry = std::pair<std::pair<std::string, std::string>, region_stat>;
+
+        std::vector<region_entry> sorted(regions.begin(), regions.end());
+        std::sort(sorted.begin(), sorted.end(), [](const region_entry & a, const region_entry & b) {
+                    return a.second.time > b.second.time;
+                });
+
+        // the per-op table of the next context shares this stream, so put its format back afterwards
+        const std::ios_base::fmtflags flags = std::cerr.flags();
+        const std::streamsize         prec  = std::cerr.precision();
+
+        std::cerr << "----------------\nVulkan Timings by region:" << std::endl;
+        for (const auto & r : sorted) {
+            const double us = r.second.time / 1000.0;
+            std::cerr << "  " << std::left << std::setw(9) << r.first.first << std::setw(18) << r.first.second << std::right
+                      << std::fixed << std::setprecision(1)
+                      << std::setw(12) << us << " us"
+                      << std::setw(7) << (total ? 100.0 * r.second.time / total : 0.0) << " %"
+                      << std::setw(9) << r.second.count << " nodes"
+                      << std::setw(10) << (r.second.count ? us / r.second.count : 0.0) << " us/node"
+                      << std::endl;
+        }
+        std::cerr << "  region total: " << std::fixed << std::setprecision(1) << (total / 1000.0) << " us." << std::endl;
+
+        std::cerr.flags(flags);
+        std::cerr.precision(prec);
     }
 
     std::string get_node_fusion_name(const ggml_tensor * node, const char *fusion_name, uint64_t *n_flops) {
@@ -2352,7 +2398,24 @@ class vk_perf_logger {
         return fusion_str + ggml_op_name(node->op);
     }
 
+    // group a node's time by the model part that built it (ggml_perf_region_set) and by the
+    // phase the caller is in (ggml_perf_phase_set), so prefill and decode stay separate
+    void log_region(const ggml_tensor * node, uint64_t time) {
+        const char * phase  = ggml_perf_phase_get();
+        const char * region = node->perf_region;
+
+        auto & e = regions[{ phase ? phase : "?", region ? region : "(untagged)" }];
+        e.time += time;
+        e.count++;
+    }
+
     void log_timing(const ggml_tensor * node, const char *fusion_name, uint64_t time) {
+        log_region(node, time);
+
+        if (vk_perf_logger_regions_only) {
+            return;
+        }
+
         uint64_t n_flops;
         std::string name = get_node_fusion_name(node, fusion_name, &n_flops);
         if (n_flops) {
@@ -2362,6 +2425,15 @@ class vk_perf_logger {
     }
 
     void log_timing(const std::vector<ggml_tensor *> &nodes, const std::vector<const char *> &names, uint64_t time) {
+        // a fused group is charged to the region of its first node
+        if (!nodes.empty()) {
+            log_region(nodes[0], time);
+        }
+
+        if (vk_perf_logger_regions_only) {
+            return;
+        }
+
         uint64_t total_flops = 0;
         std::string name;
         for (size_t n = 0; n < nodes.size(); ++n) {
@@ -2380,8 +2452,14 @@ class vk_perf_logger {
     }
 
   private:
+    struct region_stat {
+        uint64_t time  = 0;
+        uint64_t count = 0;
+    };
+
     std::map<std::string, std::vector<uint64_t>> timings;
     std::map<std::string, std::vector<uint64_t>> flops;
+    std::map<std::pair<std::string, std::string>, region_stat> regions; // key: (phase, region)
     uint32_t print_count {};
 };
 
@@ -7907,6 +7985,7 @@ static void ggml_vk_instance_init() {
 
     vk_perf_logger_enabled = getenv("GGML_VK_PERF_LOGGER") != nullptr;
     vk_perf_logger_concurrent = getenv("GGML_VK_PERF_LOGGER_CONCURRENT") != nullptr;
+    vk_perf_logger_regions_only = getenv("GGML_VK_PERF_LOGGER_REGIONS") != nullptr;
     vk_enable_sync_logger = getenv("GGML_VK_SYNC_LOGGER") != nullptr;
     vk_memory_logger_enabled = getenv("GGML_VK_MEMORY_LOGGER") != nullptr;
     const char* GGML_VK_PIPELINE_STATS = getenv("GGML_VK_PIPELINE_STATS");

@@ -1632,6 +1632,11 @@ extern "C" {
     LLAMA_API void                           llama_perf_context_print(const struct llama_context * ctx);
     LLAMA_API void                           llama_perf_context_reset(      struct llama_context * ctx);
 
+    // wall-clock breakdown of llama_decode: graph build, alloc, set inputs, submit, output copy
+    // and backend wait, split into prefill and decode ubatches. prints nothing unless the env
+    // var LLAMA_PERF_PHASES is set, so callers can call it unconditionally.
+    LLAMA_API void                           llama_perf_context_print_phases(const struct llama_context * ctx);
+
     // NOTE: the following work only with samplers constructed via llama_sampler_chain_init
     LLAMA_API struct llama_perf_sampler_data llama_perf_sampler      (const struct llama_sampler * chain);
     LLAMA_API void                           llama_perf_sampler_print(const struct llama_sampler * chain);

@@ -361,6 +361,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_hc_mix(
         ggml_tensor *  w_inject,
         ggml_tensor ** inject,
         int            il) {
+    LLM_PERF_REGION("hc.mix");
+
     const int64_t hc     = hparams.dsv4_hc_mult;
     const int64_t hc_dim = hc * n_embd;
     const int64_t nt     = x->ne[2];
@@ -406,6 +408,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_hc_combine(
         ggml_tensor * block_out,
         ggml_tensor * inject,
         int           il) {
+    LLM_PERF_REGION("hc.combine");
+
     const int64_t hc = hparams.dsv4_hc_mult;
     const int64_t nt = residual->ne[2];
 
@@ -436,6 +440,9 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
     int sections[4];
     std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
 
+    // the scope restores the caller's region on return; the switches below stay inside it
+    LLM_PERF_REGION("embd");
+
     ggml_tensor * inpL = build_inp_embd(model.tok_embd);
     cb(inpL, "model.input_embed", -1);
     ggml_build_forward_expand(gf, inpL);
@@ -461,10 +468,13 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
 
     ggml_tensor * ple_emb = nullptr;
     if (hparams.ple_n_heads > 0) {
+        LLM_PERF_REGION("ple");
         ple_emb = build_inp_ple(mctx_hyb);
         // make sure ple_emb and build_inp_embd are in the same graph split
         ggml_build_forward_expand(gf, ple_emb);
     }
+
+    ggml_perf_region_set("trunk");
 
     // the wide residual starts as hc identical copies of the embedding
     ggml_tensor * res_hc = ggml_repeat_4d(ctx0,
@@ -476,6 +486,7 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
         res->t_layer_inp[il] = res_hc;
 
         if (hparams.is_ple(il)) {
+            LLM_PERF_REGION("ple");
             res_hc = build_ple(inp->get_recr(), ple_emb, res_hc, il);
         }
 
@@ -540,6 +551,8 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
         }
     }
 
+    ggml_perf_region_set("head");
+
     // the final mixer is the output norm: there is no separate one
     ggml_tensor * cur = build_hc_mix(res_hc,
             model.hc_head_norm, model.hc_head_down, model.hc_head_up,
@@ -575,6 +588,8 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
 
     int sections[4];
     std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
+
+    LLM_PERF_REGION("mtp");
 
     auto inp = std::make_unique<llm_graph_input_embd_h>(hparams.n_embd_out());
 
@@ -766,6 +781,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_top_k(
         ggml_tensor *                           kq_mask,
         int *                                   sections,
         int                                     il) {
+    LLM_PERF_REGION("attn.qsa_index");
+
     const llama_kv_cache_context * mctx_idx = mctx_hyb->get_idx();
 
     const int64_t idx_dim  = hparams.indexer_head_size;
@@ -990,6 +1007,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
         ggml_tensor *             top_k,
         float                     kq_scale,
         int                       il) {
+    LLM_PERF_REGION("attn.core");
+
     // rotate q/k/v before they reach a quantized cache, as the dense path does. the indexer
     // has already scored with its own query in build_qsa_top_k, so top_k is unaffected.
     if (inp->self_k_rot) {
@@ -1089,6 +1108,9 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn(
 
     ggml_tensor * top_k = qsa ? build_qsa_top_k(mctx_hyb, cur, inp_pos, inp->get_kq_mask(), sections, il) : nullptr;
 
+    // the scope restores the caller's region on return; the switches below stay inside it
+    LLM_PERF_REGION("attn.proj_qkv");
+
     // Qwen3Next uses a single Q projection that outputs query + gate
     ggml_tensor * Qcur_full = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s); // [ (n_embd_head * 2) * n_head, n_tokens ]
     cb(Qcur_full, "Qcur_full", il);
@@ -1139,6 +1161,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn(
 
     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
 
+    ggml_perf_region_set("attn.core");
+
     if (top_k) {
         cur = build_attn_qsa(inp, Qcur, Kcur, Vcur, top_k, kq_scale, il);
     } else {
@@ -1147,6 +1171,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn(
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
     }
     cb(cur, "attn_pregate", il);
+
+    ggml_perf_region_set("attn.proj_out");
 
     ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);
     cb(gate_sigmoid, "gate_sigmoid", il);
@@ -1164,6 +1190,9 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
         llm_graph_input_rs * inp,
         ggml_tensor *        cur,
         int                  il) {
+    // the scope restores the caller's region on return; the switches below stay inside it
+    LLM_PERF_REGION("gdn.proj_in");
+
     const auto * mctx_cur = inp->mctx;
 
     const int64_t d_inner      = hparams.ssm_d_inner;
@@ -1202,6 +1231,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
     cb(gate, "gate", il);
 
     gate = ggml_reshape_4d(ctx0, gate, 1, num_v_heads, n_seq_tokens, n_seqs);
+
+    ggml_perf_region_set("gdn.conv");
 
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
@@ -1268,7 +1299,11 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
     cb(k_conv, "k_conv_predelta", il);
     cb(v_conv, "v_conv_predelta", il);
 
+    ggml_perf_region_set("gdn.recurrent");
+
     ggml_tensor * output = build_recurrent_attn(inp, ssm_states_all, q_conv, k_conv, v_conv, gate, beta, state, il);
+
+    ggml_perf_region_set("gdn.proj_out");
 
     ggml_tensor * z_2d = ggml_reshape_4d(ctx0, z, head_v_dim, num_v_heads, n_seq_tokens, n_seqs);
 
@@ -1287,6 +1322,9 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
 }
 
 ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, const int il) {
+    // the scope restores the caller's region on return; the switch below stays inside it
+    LLM_PERF_REGION("ffn.moe");
+
     GGML_ASSERT(model.layers[il].ffn_gate_inp != nullptr);
 
     ggml_tensor * moe_out =
@@ -1308,6 +1346,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_ffn(ggml_tensor * cur, co
 
     // shared experts, as in the Qwen3Next reference
     if (model.layers[il].ffn_up_shexp != nullptr) {
+        ggml_perf_region_set("ffn.shexp");
+
         ggml_tensor * ffn_shexp =
             build_ffn(cur,
                 model.layers[il].ffn_up_shexp, NULL, model.layers[il].ffn_up_shexp_s,

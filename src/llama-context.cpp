@@ -284,6 +284,15 @@ llama_context::llama_context(
         }
     }
 
+    {
+        const char * LLAMA_PERF_PHASES = getenv("LLAMA_PERF_PHASES");
+        perf_phases_enabled = LLAMA_PERF_PHASES ? (atoi(LLAMA_PERF_PHASES) != 0) : false;
+
+        if (perf_phases_enabled) {
+            LLAMA_LOG_INFO("%s: per-phase timing enabled\n", __func__);
+        }
+    }
+
     // ref: https://github.com/ggml-org/llama.cpp/pull/17046#discussion_r2503085732
     cparams.n_ctx = GGML_PAD(cparams.n_ctx, 256);
 
@@ -715,7 +724,13 @@ void llama_context::synchronize() {
         return;
     }
 
+    const int64_t t_sync_us = perf_phases_enabled ? ggml_time_us() : 0;
+
     ggml_backend_sched_synchronize(sched.get());
+
+    if (perf_phases_enabled) {
+        perf_ph.t_sync_us[n_queued_tokens > 1 ? 1 : 0] += ggml_time_us() - t_sync_us;
+    }
 
     // FIXME: if multiple single tokens are evaluated without a synchronization,
     // the stats will be added to the prompt evaluation stats
@@ -1348,6 +1363,14 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
+    // tells prefill ubatches from decode ubatches, both here and in the backend profilers
+    const int ph = ubatch.n_tokens > 1 ? 1 : 0;
+    ggml_perf_phase_set(ph ? "prefill" : "decode");
+
+    if (perf_phases_enabled) {
+        perf_ph.n_ubatch[ph]++;
+    }
+
     auto * res = gf_res_prev.get();
     auto * gf  = res->get_gf();
 
@@ -1366,17 +1389,23 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         }
 
         n_reused++;
+
+        if (perf_phases_enabled) {
+            perf_ph.n_reuse[ph]++;
+        }
     } else {
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
-        //const auto t_start_us = ggml_time_us();
+        const int64_t t_build_us = perf_phases_enabled ? ggml_time_us() : 0;
 
         gf = model.build_graph(gparams);
 
-        //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+        if (perf_phases_enabled) {
+            perf_ph.t_graph_build_us[ph] += ggml_time_us() - t_build_us;
+        }
 
         if (!gf) {
             LLAMA_LOG_ERROR("%s: failed to initialize graph\n", __func__);
@@ -1384,7 +1413,15 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             return nullptr;
         }
 
-        if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
+        const int64_t t_alloc_us = perf_phases_enabled ? ggml_time_us() : 0;
+
+        const bool alloc_ok = ggml_backend_sched_alloc_graph(sched.get(), gf);
+
+        if (perf_phases_enabled) {
+            perf_ph.t_graph_alloc_us[ph] += ggml_time_us() - t_alloc_us;
+        }
+
+        if (!alloc_ok) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
             return nullptr;
@@ -1393,15 +1430,24 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
     // set the input data for the input tensors
     {
-        //const auto t_start_us = ggml_time_us();
+        const int64_t t_inputs_us = perf_phases_enabled ? ggml_time_us() : 0;
 
         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
         res->set_inputs(&ubatch);
 
-        //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+        if (perf_phases_enabled) {
+            perf_ph.t_set_inputs_us[ph] += ggml_time_us() - t_inputs_us;
+        }
     }
 
+    const int64_t t_submit_us = perf_phases_enabled ? ggml_time_us() : 0;
+
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+
+    if (perf_phases_enabled) {
+        perf_ph.t_submit_us[ph] += ggml_time_us() - t_submit_us;
+    }
+
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
@@ -1750,7 +1796,16 @@ int llama_context::decode(const llama_batch & batch_inp) {
     bool did_optimize = false;
 
     // handle any pending shifts/copies
-    memory_update(false);
+    {
+        const int64_t t_mem_us = perf_phases_enabled ? ggml_time_us() : 0;
+
+        memory_update(false);
+
+        if (perf_phases_enabled) {
+            // the update runs before the ubatch split, so charge it to the batch as a whole
+            perf_ph.t_memory_us[n_tokens_all > 1 ? 1 : 0] += ggml_time_us() - t_mem_us;
+        }
+    }
 
     llama_memory_context_ptr mctx;
 
@@ -1870,6 +1925,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
         //}
 
+        const int64_t t_out_us = perf_phases_enabled ? ggml_time_us() : 0;
+
         auto * t_logits  = res->get_logits();
         auto * t_embd    = cparams.embeddings       ? res->get_embd()     : nullptr;
         auto * t_h_nextn = cparams.embeddings_nextn ? res->get_h_nextn()  : nullptr;
@@ -1982,6 +2039,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
             copy_tensor_async_rows(res->t_sampled_logits, sampling.logits,     stride, n_outputs_prev, sched.get(), &sampling.logits_count);
             copy_tensor_async_rows(res->t_sampled_probs,  sampling.probs,      stride, n_outputs_prev, sched.get(), &sampling.probs_count);
             copy_tensor_async_rows(res->t_candidates,     sampling.candidates, stride, n_outputs_prev, sched.get(), &sampling.candidates_count);
+        }
+
+        if (perf_phases_enabled) {
+            perf_ph.t_output_us[ubatch.n_tokens > 1 ? 1 : 0] += ggml_time_us() - t_out_us;
         }
 
         n_outputs_prev += n_outputs;
@@ -3356,6 +3417,42 @@ void llama_context::perf_reset() {
     t_eval_us   = n_eval = 0;
     t_p_eval_us = n_p_eval = 0;
     n_reused    = 0;
+    perf_ph     = perf_phases();
+}
+
+void llama_context::perf_print_phases() const {
+    if (!perf_phases_enabled) {
+        return;
+    }
+
+    // straight to stderr, like the backend perf loggers: the caller asked for this with an env
+    // var, and tools that raise the log threshold would otherwise swallow it
+    fprintf(stderr, "----------------\nPhase breakdown:\n");
+    fprintf(stderr, "  %-16s %14s %14s\n", "", "prefill", "decode");
+    fprintf(stderr, "  %-16s %14" PRId64 " %14" PRId64 "\n", "ubatches",     perf_ph.n_ubatch[1], perf_ph.n_ubatch[0]);
+    fprintf(stderr, "  %-16s %14" PRId64 " %14" PRId64 "\n", "graph reused", perf_ph.n_reuse[1],  perf_ph.n_reuse[0]);
+
+    // total ms over the run, then the mean cost of one ubatch in us
+    auto row = [&](const char * name, const int64_t * t) {
+        const double ms_p = 1e-3 * t[1];
+        const double ms_d = 1e-3 * t[0];
+
+        const double us_p = perf_ph.n_ubatch[1] ? (double) t[1] / perf_ph.n_ubatch[1] : 0.0;
+        const double us_d = perf_ph.n_ubatch[0] ? (double) t[0] / perf_ph.n_ubatch[0] : 0.0;
+
+        fprintf(stderr, "  %-16s %9.2f ms %9.2f ms   (%9.1f us %9.1f us per ubatch)\n",
+                name, ms_p, ms_d, us_p, us_d);
+    };
+
+    row("memory update", perf_ph.t_memory_us);
+    row("graph build",   perf_ph.t_graph_build_us);
+    row("graph alloc",   perf_ph.t_graph_alloc_us);
+    row("set inputs",    perf_ph.t_set_inputs_us);
+    row("submit",        perf_ph.t_submit_us);
+    row("output copy",   perf_ph.t_output_us);
+    row("backend wait",  perf_ph.t_sync_us);
+
+    fflush(stderr);
 }
 
 llama_memory_breakdown llama_context::memory_breakdown() const {
@@ -4273,6 +4370,12 @@ void llama_perf_context_print(const llama_context * ctx) {
             __func__, data.t_eval_ms, data.n_eval, data.t_eval_ms / data.n_eval, 1e3 / data.t_eval_ms * data.n_eval);
     LLAMA_LOG_INFO("%s:       total time = %10.2f ms / %5d tokens\n", __func__, (t_end_ms - data.t_start_ms), (data.n_p_eval + data.n_eval));
     LLAMA_LOG_INFO("%s:    graphs reused = %10d\n", __func__, data.n_reused);
+
+    ctx->perf_print_phases();
+}
+
+void llama_perf_context_print_phases(const llama_context * ctx) {
+    ctx->perf_print_phases();
 }
 
 void llama_perf_context_reset(llama_context * ctx) {
