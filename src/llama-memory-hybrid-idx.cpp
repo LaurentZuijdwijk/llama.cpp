@@ -503,7 +503,14 @@ uint32_t llama_memory_hybrid_idx_context::qsa_pooled_n_dirty_max(const llama_uba
     const int64_t n_complete = (int64_t) (q_max + 1)/ratio;
     const int64_t w          = std::min(mem->pooled_valid(seq), n_complete);
 
-    return (uint32_t) std::max<int64_t>(1, n_complete - w);
+    // A ubatch of n tokens completes at most this many blocks. Sizing the tables from the
+    // ubatch rather than from the exact count keeps the shape stable across steps that land on
+    // different block boundaries (a 5-token spec verify completes 1 or 2 blocks), so the graph
+    // can be reused; set_input fills the unused rows with the dustbin. The exact count still
+    // wins when it is larger, which is the pending refill after a state load.
+    const int64_t bound = (int64_t) (ubatch.n_tokens + ratio - 1)/ratio + 1;
+
+    return (uint32_t) std::max<int64_t>(bound, n_complete - w);
 }
 
 void llama_memory_hybrid_idx_context::set_input_qsa(
