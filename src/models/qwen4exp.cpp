@@ -382,10 +382,10 @@ ggml_tensor * llama_model_qwen4exp::graph::build_hc_mix(
     ggml_tensor * gated = ggml_mul(ctx0, xn, gate);
     gated = ggml_reshape_3d(ctx0, gated, n_embd, hc, nt);
 
-    // collapse the streams by their mean
+    // collapse the streams by their mean; the adds read the strided views directly and the
+    // Vulkan backend fuses the chain into one MULTI_ADD, so no cont of the first stream
     ggml_tensor * mixed = ggml_view_2d(ctx0, gated, n_embd, nt,
             ggml_row_size(gated->type, n_embd) * hc, 0);
-    mixed = ggml_cont(ctx0, mixed);
     for (int64_t c = 1; c < hc; ++c) {
         ggml_tensor * s = ggml_view_2d(ctx0, gated, n_embd, nt,
                 ggml_row_size(gated->type, n_embd) * hc,
