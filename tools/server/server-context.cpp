@@ -2346,7 +2346,7 @@ private:
         res->n_tokens  = slot.task->n_tokens();
         res->res_type  = slot.task->params.res_type;
 
-        const int n_embd_out = llama_model_n_embd_out(model_tgt);
+        const int n_embd_out = llama_model_n_embd_embed(model_tgt);
 
         std::vector<float> embd_res(n_embd_out, 0.0f);
 

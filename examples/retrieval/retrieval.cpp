@@ -220,7 +220,7 @@ int main(int argc, char ** argv) {
     struct llama_batch batch = llama_batch_init(n_batch, 0, 1);
 
     // allocate output
-    const int n_embd_out = llama_model_n_embd_out(model);
+    const int n_embd_out = llama_model_n_embd_embed(model);
     std::vector<float> embeddings(n_chunks * n_embd_out, 0);
     float * emb = embeddings.data();
 

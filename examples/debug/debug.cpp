@@ -60,7 +60,7 @@ struct output_data {
         prompt = params.prompt;
 
         if (params.embedding) {
-            const int n_embd       = llama_model_n_embd_out(model);
+            const int n_embd       = llama_model_n_embd_embed(model);
             const bool pooling     = has_pooling(ctx);
             const int n_embd_count = pooling ? 1 : tokens.size();
             const int n_floats     = n_embd * n_embd_count;

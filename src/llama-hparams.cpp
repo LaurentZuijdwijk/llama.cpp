@@ -112,6 +112,12 @@ uint32_t llama_hparams::n_embd_out() const {
     return n_embd_out_impl > 0 ? n_embd_out_impl : n_embd;
 }
 
+uint32_t llama_hparams::n_embd_embed() const {
+    // see the comment on the declaration: hyper-connection archs set n_embd_out_impl to the
+    // n_embd*hc hand-over width, but emit n_embd-wide embeddings.
+    return dsv4_hc_mult > 1 ? n_embd : n_embd_out();
+}
+
 uint32_t llama_hparams::n_embd_head_k(uint32_t il) const {
     if (il < n_layer_all) {
         return is_swa(il) ? n_embd_head_k_swa : n_embd_head_k_full;

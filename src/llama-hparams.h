@@ -394,6 +394,14 @@ struct llama_hparams {
     // dimension of output embeddings
     uint32_t n_embd_out() const;
 
+    // Width of the embeddings the model actually emits (per-token and pooled).
+    // On hyper-connection architectures (deepseek4, qwen4exp) n_embd_out() doubles as the
+    // trunk->MTP hand-over width, n_embd*hc, which is NOT what the head emits: the hc streams
+    // are collapsed by the head mixer, so the embedding output is n_embd wide. Using
+    // n_embd_out() for embeddings there reads hc times too much and aborts in
+    // ggml_backend_tensor_get_async ("tensor read out of bounds").
+    uint32_t n_embd_embed() const;
+
     // dimension of key/value embeddings for each head (per layer)
     uint32_t n_embd_head_k(uint32_t il = 0) const;
     uint32_t n_embd_head_v(uint32_t il = 0) const;

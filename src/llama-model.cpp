@@ -2736,6 +2736,10 @@ int32_t llama_model_n_embd_out(const llama_model * model) {
     return model->hparams.n_embd_out();
 }
 
+int32_t llama_model_n_embd_embed(const llama_model * model) {
+    return model->hparams.n_embd_embed();
+}
+
 int32_t llama_model_n_layer(const llama_model * model) {
     return model->hparams.n_layer();
 }
