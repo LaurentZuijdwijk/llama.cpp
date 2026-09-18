@@ -66,6 +66,7 @@ struct tensor_statistics {
 //                               error propagation only (error_scope=superblock), never the
 //                               cross-band trailing update. Tensors with ne0 % 256 != 0 skipped.
 //   LLAMA_HESSIAN_FILTER=a,b,c  only tensors whose name contains one of the substrings
+//   LLAMA_HESSIAN_LAYERS=A-B    only blk.A .. blk.B inclusive (memory: run layer ranges in passes)
 // Sums are NOT divided by count; count (token rows) is in the json. Symmetrised on save.
 // Every 2D MUL_MAT weight the imatrix path sees is covered.
 //
@@ -86,10 +87,12 @@ extern "C" void cblas_ssyrk(int order, int uplo, int trans, int n, int k, float 
 enum { HESS_CBLAS_ROW_MAJOR = 101, HESS_CBLAS_UPPER = 121, HESS_CBLAS_TRANS = 112 };
 
 struct HessianStats {
-    int64_t             ne0   = 0;
-    int64_t             count = 0;   // token rows accumulated
-    std::vector<float>  h;           // full: ne0*ne0 (upper valid); blockdiag: (ne0/256)*256*256
-    std::vector<double> diag;        // independent diagonal for the imatrix cross-check
+    int64_t                  ne0   = 0;
+    int64_t                  count = 0;   // token rows accumulated
+    std::vector<float>       h;           // full: ne0*ne0 (upper valid); blockdiag: (ne0/256)*256*256
+    std::vector<double>      diag;        // independent diagonal for the imatrix cross-check
+    std::string              owner;       // the first weight seen reading this input; files are named after it
+    std::vector<std::string> consumers;   // every weight reading this input (owner first)
 };
 
 class IMatrixCollector {
@@ -120,7 +123,14 @@ private:
     bool                                            m_hess_blockdiag = false;
     std::string                                     m_hess_dir;
     std::vector<std::string>                        m_hess_filter;
+    int                                             m_hess_layer_lo = -1;
+    int                                             m_hess_layer_hi = -1;
+    // Keyed by the INPUT node name (src1->name), not the weight: weights that read the same
+    // activation (attn_gate/ssm_alpha/ssm_beta; ffn_gate/ffn_up; attn_q/attn_k) share one H.
+    // Only the first-registered consumer accumulates; the others are recorded as aliases.
+    // A false share is caught downstream: each consumer's imatrix must equal diag(H)/count.
     std::unordered_map<std::string, HessianStats>   m_hess;
+    std::unordered_map<std::string, std::string>    m_hess_key_of;   // weight name -> input key
     std::vector<float>                              m_hess_buf;
 };
 
@@ -303,7 +313,13 @@ void IMatrixCollector::init_hessian_from_env() {
             if (!item.empty()) m_hess_filter.push_back(item);
         }
     }
-    LOG_INF("%s: Hessian collection enabled, mode=%s -> %s (%zu name filters)\n", __func__, m_hess_blockdiag ? "blockdiag" : "full", m_hess_dir.c_str(), m_hess_filter.size());
+    if (const char * lr = getenv("LLAMA_HESSIAN_LAYERS")) {
+        if (sscanf(lr, "%d-%d", &m_hess_layer_lo, &m_hess_layer_hi) != 2 || m_hess_layer_lo < 0 || m_hess_layer_hi < m_hess_layer_lo) {
+            LOG_ERR("%s: LLAMA_HESSIAN_LAYERS must be A-B, got '%s'\n", __func__, lr);
+            exit(1);
+        }
+    }
+    LOG_INF("%s: Hessian collection enabled, mode=%s -> %s (%zu name filters, layers %d..%d)\n", __func__, m_hess_blockdiag ? "blockdiag" : "full", m_hess_dir.c_str(), m_hess_filter.size(), m_hess_layer_lo, m_hess_layer_hi);
 }
 
 void IMatrixCollector::accumulate_hessian(const std::string & wname, const char * base, const struct ggml_tensor * src1) {
@@ -314,11 +330,27 @@ void IMatrixCollector::accumulate_hessian(const std::string & wname, const char 
         }
         if (!keep) return;
     }
+    if (m_hess_layer_lo >= 0) {
+        std::string layer, tensor;
+        process_tensor_name(wname, layer, tensor);
+        int l = layer.empty() ? -1 : atoi(layer.c_str());
+        if (l < m_hess_layer_lo || l > m_hess_layer_hi) return;
+    }
     const int64_t ne0  = src1->ne[0];
     const int64_t rows = src1->ne[1];
-    auto & hs = m_hess[wname];
     if (m_hess_blockdiag && ne0 % 256 != 0) {
         return; // never a k-quant band structure; not a Q3_K candidate
+    }
+    std::string key = src1->name[0] ? std::string(src1->name) : wname;
+    if (m_hess_key_of.find(wname) == m_hess_key_of.end()) {
+        m_hess_key_of[wname] = key;
+        auto & reg = m_hess[key];
+        if (reg.owner.empty()) reg.owner = wname;
+        reg.consumers.push_back(wname);
+    }
+    auto & hs = m_hess[m_hess_key_of[wname]];
+    if (hs.owner != wname) {
+        return; // the owner accumulates this input once per batch; we are an alias
     }
     if (hs.h.empty()) {
         hs.ne0 = ne0;
@@ -362,7 +394,7 @@ void IMatrixCollector::save_hessians() const {
         const auto & hs = kv.second;
         const int64_t n = hs.ne0;
         std::vector<float> full(hs.h);
-        const std::string stem = m_hess_dir + "/" + kv.first;
+        const std::string stem = m_hess_dir + "/" + hs.owner;
         if (m_hess_blockdiag) {
             for (int64_t b = 0; b < n / 256; ++b) {
                 float * blk = full.data() + (size_t) b * 256 * 256;
@@ -389,14 +421,20 @@ void IMatrixCollector::save_hessians() const {
         }
         {
             std::ofstream f(stem + ".hessian.json");
-            f << "{\"tensor\":\"" << kv.first << "\",\"ne0\":" << n << ",\"count\":" << hs.count
+            f << "{\"tensor\":\"" << hs.owner << "\",\"input\":\"" << kv.first << "\",\"consumers\":[";
+            for (size_t i = 0; i < hs.consumers.size(); ++i) f << (i ? "," : "") << "\"" << hs.consumers[i] << "\"";
+            f << "],\"ne0\":" << n << ",\"count\":" << hs.count
               << ",\"mode\":\"" << (m_hess_blockdiag ? "blockdiag" : "full") << "\""
               << ",\"layout\":\"" << (m_hess_blockdiag
                     ? "f32, ne0/256 blocks of 256x256 row-major concatenated: the diagonal 256-bands of H = sum x x^T over count token rows, not divided by count"
                     : "f32 row-major ne0 x ne0, H = sum over count token rows of x x^T, not divided by count")
               << "; diag.f64 is the full diagonal accumulated independently in double\"}\n";
         }
-        fprintf(stderr, "hessian: saved %s (ne0=%lld, count=%lld)\n", kv.first.c_str(), (long long) n, (long long) hs.count);
+        for (size_t i = 1; i < hs.consumers.size(); ++i) {
+            std::ofstream f(m_hess_dir + "/" + hs.consumers[i] + ".hessian.json");
+            f << "{\"tensor\":\"" << hs.consumers[i] << "\",\"alias_of\":\"" << hs.owner << "\",\"input\":\"" << kv.first << "\"}\n";
+        }
+        fprintf(stderr, "hessian: saved %s <- %s (ne0=%lld, count=%lld, %zu consumers)\n", hs.owner.c_str(), kv.first.c_str(), (long long) n, (long long) hs.count, hs.consumers.size());
     }
 }
 
