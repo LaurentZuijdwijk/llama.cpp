@@ -15,6 +15,8 @@
 #include <thread>
 #include <mutex>
 #include <vector>
+#include <sstream>
+#include <cstdlib>
 #include <fstream>
 #include <unordered_map>
 #include <map>
@@ -55,9 +57,47 @@ struct tensor_statistics {
     float cossim       = 0.0f;
 };
 
+// ---- Hessian collection for the closed-loop encoder (env-configured) ----
+//   LLAMA_HESSIAN_OUT=DIR       enable; writes DIR/<tensor>.hessian.* at exit
+//   LLAMA_HESSIAN_MODE=full     (default) H = sum x x^T, f32 ne0 x ne0 -> <tensor>.hessian.f32
+//   LLAMA_HESSIAN_MODE=blockdiag only the 256x256 diagonal blocks (k-quant super-bands),
+//                               ne0/256 blocks concatenated -> <tensor>.hessian.bd256.f32.
+//                               ~ne0/256 times cheaper and smaller; supports within-band
+//                               error propagation only (error_scope=superblock), never the
+//                               cross-band trailing update. Tensors with ne0 % 256 != 0 skipped.
+//   LLAMA_HESSIAN_FILTER=a,b,c  only tensors whose name contains one of the substrings
+// Sums are NOT divided by count; count (token rows) is in the json. Symmetrised on save.
+// Every 2D MUL_MAT weight the imatrix path sees is covered.
+//
+// MUL_MAT_ID (MoE experts) is SKIPPED — reason: collector plumbing, not principle. The expert
+// path already gathers rows per routed expert for the diagonal (see the ids loop below); a
+// per-expert H needs the same gather into a contiguous rows x ne0 buffer per expert, one SYRK
+// per expert, and a per-expert count so the consumer can judge sample size (experts fire on a
+// biased subset of tokens). TODO(hessian-moe): implement exactly that when a MoE target
+// appears; until then a MoE model gets diag-only imatrix for experts and a warning here.
+//
+// The diagonal is accumulated a second time, in double and independently of the SYRK, so
+// diag(H)/count can be cross-checked against the imatrix this same run writes. Note the
+// imatrix itself is a plain sequential f32 sum (acc[j] += x*x, no compensation), so the fp64
+// diagonal is the more accurate of the two; agreement is expected to within fp32 accumulation
+// error (~sqrt(count) * eps relative, typical; count * eps worst case), not bitwise.
+extern "C" void cblas_ssyrk(int order, int uplo, int trans, int n, int k, float alpha,
+                            const float * a, int lda, float beta, float * c, int ldc);
+enum { HESS_CBLAS_ROW_MAJOR = 101, HESS_CBLAS_UPPER = 121, HESS_CBLAS_TRANS = 112 };
+
+struct HessianStats {
+    int64_t             ne0   = 0;
+    int64_t             count = 0;   // token rows accumulated
+    std::vector<float>  h;           // full: ne0*ne0 (upper valid); blockdiag: (ne0/256)*256*256
+    std::vector<double> diag;        // independent diagonal for the imatrix cross-check
+};
+
 class IMatrixCollector {
 public:
     IMatrixCollector() = default;
+    ~IMatrixCollector() { if (m_hess_enabled) save_hessians(); }
+    void init_hessian_from_env();
+    void save_hessians() const;
     void set_params(common_params params) { m_params = std::move(params); }
     bool collect_imatrix(struct ggml_tensor * t, bool ask, void * user_data);
     void save_imatrix_legacy(int32_t ncall = -1) const;
@@ -72,6 +112,16 @@ private:
     int32_t                                m_last_chunk = 0;
     std::vector<char>                      m_src1_data;
     std::vector<char>                      m_ids; // the expert ids from ggml_mul_mat_id
+
+    // Hessian collection (see LLAMA_HESSIAN_OUT above)
+    void accumulate_hessian(const std::string & wname, const char * base, const struct ggml_tensor * src1);
+    bool                                            m_hess_enabled = false;
+    bool                                            m_hess_warned_moe = false;
+    bool                                            m_hess_blockdiag = false;
+    std::string                                     m_hess_dir;
+    std::vector<std::string>                        m_hess_filter;
+    std::unordered_map<std::string, HessianStats>   m_hess;
+    std::vector<float>                              m_hess_buf;
 };
 
 // remove any prefix and suffixes from the name
@@ -231,6 +281,125 @@ static bool all_finite(const float * v, size_t n) {
     return true;
 }
 
+void IMatrixCollector::init_hessian_from_env() {
+    const char * dir = getenv("LLAMA_HESSIAN_OUT");
+    if (!dir || !*dir) {
+        return;
+    }
+    m_hess_dir = dir;
+    m_hess_enabled = true;
+    if (const char * mode = getenv("LLAMA_HESSIAN_MODE")) {
+        if (strcmp(mode, "blockdiag") == 0) {
+            m_hess_blockdiag = true;
+        } else if (strcmp(mode, "full") != 0) {
+            LOG_ERR("%s: LLAMA_HESSIAN_MODE must be full or blockdiag, got '%s'\n", __func__, mode);
+            exit(1);
+        }
+    }
+    if (const char * f = getenv("LLAMA_HESSIAN_FILTER")) {
+        std::istringstream ss(f);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            if (!item.empty()) m_hess_filter.push_back(item);
+        }
+    }
+    LOG_INF("%s: Hessian collection enabled, mode=%s -> %s (%zu name filters)\n", __func__, m_hess_blockdiag ? "blockdiag" : "full", m_hess_dir.c_str(), m_hess_filter.size());
+}
+
+void IMatrixCollector::accumulate_hessian(const std::string & wname, const char * base, const struct ggml_tensor * src1) {
+    if (!m_hess_filter.empty()) {
+        bool keep = false;
+        for (const auto & f : m_hess_filter) {
+            if (wname.find(f) != std::string::npos) { keep = true; break; }
+        }
+        if (!keep) return;
+    }
+    const int64_t ne0  = src1->ne[0];
+    const int64_t rows = src1->ne[1];
+    auto & hs = m_hess[wname];
+    if (m_hess_blockdiag && ne0 % 256 != 0) {
+        return; // never a k-quant band structure; not a Q3_K candidate
+    }
+    if (hs.h.empty()) {
+        hs.ne0 = ne0;
+        hs.h.assign(m_hess_blockdiag ? (size_t) ne0 * 256 : (size_t) ne0 * ne0, 0.0f);
+        hs.diag.assign((size_t) ne0, 0.0);
+    } else if (hs.ne0 != ne0) {
+        LOG_ERR("%s: Hessian shape changed for %s (%lld vs %lld)\n", __func__, wname.c_str(), (long long) hs.ne0, (long long) ne0);
+        exit(1);
+    }
+    const float * a;
+    if (src1->nb[1] == (size_t) ne0 * sizeof(float)) {
+        a = (const float *) base;
+    } else {
+        m_hess_buf.resize((size_t) rows * ne0);
+        for (int64_t r = 0; r < rows; ++r) {
+            memcpy(m_hess_buf.data() + r * ne0, base + r * src1->nb[1], ne0 * sizeof(float));
+        }
+        a = m_hess_buf.data();
+    }
+    if (m_hess_blockdiag) {
+        // one 256-band at a time: C_b := A[:, b] ^T A[:, b] + C_b, A[:, b] addressed in place (lda = ne0)
+        for (int64_t b = 0; b < ne0 / 256; ++b) {
+            cblas_ssyrk(HESS_CBLAS_ROW_MAJOR, HESS_CBLAS_UPPER, HESS_CBLAS_TRANS, 256, (int) rows, 1.0f,
+                        a + b * 256, (int) ne0, 1.0f, hs.h.data() + (size_t) b * 256 * 256, 256);
+        }
+    } else {
+        // C := A^T A + C, A is rows x ne0 row-major -> C is ne0 x ne0 (upper)
+        cblas_ssyrk(HESS_CBLAS_ROW_MAJOR, HESS_CBLAS_UPPER, HESS_CBLAS_TRANS, (int) ne0, (int) rows, 1.0f, a, (int) ne0, 1.0f, hs.h.data(), (int) ne0);
+    }
+    for (int64_t r = 0; r < rows; ++r) {
+        const float * x = a + r * ne0;
+        for (int64_t j = 0; j < ne0; ++j) {
+            hs.diag[j] += (double) x[j] * (double) x[j];
+        }
+    }
+    hs.count += rows;
+}
+
+void IMatrixCollector::save_hessians() const {
+    for (const auto & kv : m_hess) {
+        const auto & hs = kv.second;
+        const int64_t n = hs.ne0;
+        std::vector<float> full(hs.h);
+        const std::string stem = m_hess_dir + "/" + kv.first;
+        if (m_hess_blockdiag) {
+            for (int64_t b = 0; b < n / 256; ++b) {
+                float * blk = full.data() + (size_t) b * 256 * 256;
+                for (int64_t i = 0; i < 256; ++i) {
+                    for (int64_t j = 0; j < i; ++j) {
+                        blk[i * 256 + j] = blk[j * 256 + i];
+                    }
+                }
+            }
+            std::ofstream f(stem + ".hessian.bd256.f32", std::ios::binary);
+            f.write((const char *) full.data(), (std::streamsize) (full.size() * sizeof(float)));
+        } else {
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = 0; j < i; ++j) {
+                    full[(size_t) i * n + j] = full[(size_t) j * n + i];
+                }
+            }
+            std::ofstream f(stem + ".hessian.f32", std::ios::binary);
+            f.write((const char *) full.data(), (std::streamsize) (full.size() * sizeof(float)));
+        }
+        {
+            std::ofstream f(stem + ".hessian.diag.f64", std::ios::binary);
+            f.write((const char *) hs.diag.data(), (std::streamsize) (hs.diag.size() * sizeof(double)));
+        }
+        {
+            std::ofstream f(stem + ".hessian.json");
+            f << "{\"tensor\":\"" << kv.first << "\",\"ne0\":" << n << ",\"count\":" << hs.count
+              << ",\"mode\":\"" << (m_hess_blockdiag ? "blockdiag" : "full") << "\""
+              << ",\"layout\":\"" << (m_hess_blockdiag
+                    ? "f32, ne0/256 blocks of 256x256 row-major concatenated: the diagonal 256-bands of H = sum x x^T over count token rows, not divided by count"
+                    : "f32 row-major ne0 x ne0, H = sum over count token rows of x x^T, not divided by count")
+              << "; diag.f64 is the full diagonal accumulated independently in double\"}\n";
+        }
+        fprintf(stderr, "hessian: saved %s (ne0=%lld, count=%lld)\n", kv.first.c_str(), (long long) n, (long long) hs.count);
+    }
+}
+
 bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * user_data) {
     GGML_UNUSED(user_data);
 
@@ -268,6 +437,10 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
     // this has been adapted to the new format of storing merged experts in a single 3d tensor
     // ref: https://github.com/ggml-org/llama.cpp/pull/6387
     if (t->op == GGML_OP_MUL_MAT_ID) {
+        if (m_hess_enabled && !m_hess_warned_moe) {
+            LOG_WRN("%s: Hessian collection skips MUL_MAT_ID (expert) tensors, first seen: %s\n", __func__, wname.c_str());
+            m_hess_warned_moe = true;
+        }
         //   ids  -> [n_experts_used, n_tokens]
         //   src1 -> [cols, n_expert_used, n_tokens]
         const ggml_tensor * ids = t->src[2];
@@ -394,6 +567,9 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
                     for (int64_t j = 0; j < ne0; ++j) {
                         acc[j] += x[j] * x[j];
                     }
+                }
+                if (m_hess_enabled && n_mat == 1) {
+                    accumulate_hessian(wname, data + i2 * src1->nb[2] + i3 * src1->nb[3], src1);
                 }
             }
         }
@@ -1092,6 +1268,7 @@ int main(int argc, char ** argv) {
 
     // set_params before show_statistics so load_imatrix has valid n_ctx/n_parallel
     g_collector.set_params(params);
+    g_collector.init_hessian_from_env();
 
     if (params.show_statistics) {
         if (!show_statistics(params)) {
