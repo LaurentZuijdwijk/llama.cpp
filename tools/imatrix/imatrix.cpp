@@ -15,6 +15,8 @@
 #include <thread>
 #include <mutex>
 #include <vector>
+#include <iterator>
+#include <dirent.h>
 #include <sstream>
 #include <cstdlib>
 #include <fstream>
@@ -67,6 +69,10 @@ struct tensor_statistics {
 //                               cross-band trailing update. Tensors with ne0 % 256 != 0 skipped.
 //   LLAMA_HESSIAN_FILTER=a,b,c  only tensors whose name contains one of the substrings
 //   LLAMA_HESSIAN_LAYERS=A-B    only blk.A .. blk.B inclusive (memory: run layer ranges in passes)
+//   LLAMA_HESSIAN_SAVE_EVERY=N  also write all Hessians every N chunks (crash safety; ~7 GB per pass here)
+//   LLAMA_HESSIAN_RESUME=1      load existing <tensor>.hessian.* from the out dir at start and keep
+//                               accumulating; pair with --in-file <checkpoint> --chunk <N> so the
+//                               imatrix and the token position resume from the same checkpoint
 // Sums are NOT divided by count; count (token rows) is in the json. Symmetrised on save.
 // Every 2D MUL_MAT weight the imatrix path sees is covered.
 //
@@ -101,6 +107,7 @@ public:
     ~IMatrixCollector() { if (m_hess_enabled) save_hessians(); }
     void init_hessian_from_env();
     void save_hessians() const;
+    void load_hessians();
     void set_params(common_params params) { m_params = std::move(params); }
     bool collect_imatrix(struct ggml_tensor * t, bool ask, void * user_data);
     void save_imatrix_legacy(int32_t ncall = -1) const;
@@ -125,6 +132,9 @@ private:
     std::vector<std::string>                        m_hess_filter;
     int                                             m_hess_layer_lo = -1;
     int                                             m_hess_layer_hi = -1;
+    int                                             m_hess_save_every = 0;
+    int                                             m_hess_last_save_chunk = 0;
+    bool                                            m_hess_resume = false;
     // Keyed by the INPUT node name (src1->name), not the weight: weights that read the same
     // activation (attn_gate/ssm_alpha/ssm_beta; ffn_gate/ffn_up; attn_q/attn_k) share one H.
     // Only the first-registered consumer accumulates; the others are recorded as aliases.
@@ -319,7 +329,16 @@ void IMatrixCollector::init_hessian_from_env() {
             exit(1);
         }
     }
-    LOG_INF("%s: Hessian collection enabled, mode=%s -> %s (%zu name filters, layers %d..%d)\n", __func__, m_hess_blockdiag ? "blockdiag" : "full", m_hess_dir.c_str(), m_hess_filter.size(), m_hess_layer_lo, m_hess_layer_hi);
+    if (const char * se = getenv("LLAMA_HESSIAN_SAVE_EVERY")) {
+        m_hess_save_every = atoi(se);
+    }
+    if (const char * r = getenv("LLAMA_HESSIAN_RESUME")) {
+        m_hess_resume = atoi(r) != 0;
+    }
+    LOG_INF("%s: Hessian collection enabled, mode=%s -> %s (%zu name filters, layers %d..%d, save every %d chunks, resume=%d)\n", __func__, m_hess_blockdiag ? "blockdiag" : "full", m_hess_dir.c_str(), m_hess_filter.size(), m_hess_layer_lo, m_hess_layer_hi, m_hess_save_every, (int) m_hess_resume);
+    if (m_hess_resume) {
+        load_hessians();
+    }
 }
 
 void IMatrixCollector::accumulate_hessian(const std::string & wname, const char * base, const struct ggml_tensor * src1) {
@@ -387,6 +406,71 @@ void IMatrixCollector::accumulate_hessian(const std::string & wname, const char 
         }
     }
     hs.count += rows;
+}
+
+void IMatrixCollector::load_hessians() {
+    // Resume: every <owner>.hessian.json without "alias_of" in the out dir names a stored H.
+    // Reads the json by hand (flat, written by save_hessians) — no json library in this tool.
+    DIR * d = opendir(m_hess_dir.c_str());
+    if (!d) {
+        LOG_ERR("%s: cannot open %s\n", __func__, m_hess_dir.c_str());
+        exit(1);
+    }
+    int loaded = 0;
+    struct dirent * de;
+    while ((de = readdir(d)) != nullptr) {
+        std::string fn = de->d_name;
+        const std::string suf = ".hessian.json";
+        if (fn.size() <= suf.size() || fn.compare(fn.size() - suf.size(), suf.size(), suf) != 0) continue;
+        std::ifstream jf(m_hess_dir + "/" + fn);
+        std::string js((std::istreambuf_iterator<char>(jf)), std::istreambuf_iterator<char>());
+        if (js.find("\"alias_of\"") != std::string::npos) continue;
+        auto field = [&](const char * key) -> std::string {
+            std::string k = std::string("\"") + key + "\":";
+            size_t p = js.find(k);
+            if (p == std::string::npos) return "";
+            p += k.size();
+            if (js[p] == '"') { size_t q = js.find('"', p + 1); return js.substr(p + 1, q - p - 1); }
+            size_t q = js.find_first_of(",}", p); return js.substr(p, q - p);
+        };
+        const std::string owner = field("tensor"), input = field("input"), mode = field("mode");
+        const int64_t ne0 = atoll(field("ne0").c_str()), count = atoll(field("count").c_str());
+        if (owner.empty() || input.empty() || ne0 <= 0) continue;
+        const bool bd = mode == "blockdiag";
+        if (bd != m_hess_blockdiag) {
+            LOG_ERR("%s: %s was saved in mode %s, this run is %s\n", __func__, fn.c_str(), mode.c_str(), m_hess_blockdiag ? "blockdiag" : "full");
+            exit(1);
+        }
+        auto & hs = m_hess[input];
+        hs.ne0 = ne0; hs.count = count; hs.owner = owner;
+        // consumers: ["a","b",...]
+        size_t cp = js.find("\"consumers\":[");
+        if (cp != std::string::npos) {
+            size_t e = js.find(']', cp);
+            std::string list = js.substr(cp + 13, e - cp - 13);
+            std::istringstream ss(list); std::string item;
+            while (std::getline(ss, item, ',')) {
+                item.erase(std::remove(item.begin(), item.end(), '"'), item.end());
+                if (!item.empty()) { hs.consumers.push_back(item); m_hess_key_of[item] = input; }
+            }
+        }
+        const std::string stem = m_hess_dir + "/" + owner;
+        const size_t nh = bd ? (size_t) ne0 * 256 : (size_t) ne0 * ne0;
+        hs.h.assign(nh, 0.0f);
+        {
+            std::ifstream f(stem + (bd ? ".hessian.bd256.f32" : ".hessian.f32"), std::ios::binary);
+            f.read((char *) hs.h.data(), (std::streamsize) (nh * sizeof(float)));
+            if ((size_t) f.gcount() != nh * sizeof(float)) { LOG_ERR("%s: short read for %s\n", __func__, owner.c_str()); exit(1); }
+        }
+        hs.diag.assign((size_t) ne0, 0.0);
+        {
+            std::ifstream f(stem + ".hessian.diag.f64", std::ios::binary);
+            f.read((char *) hs.diag.data(), (std::streamsize) (ne0 * sizeof(double)));
+        }
+        ++loaded;
+    }
+    closedir(d);
+    LOG_INF("%s: resumed %d Hessians from %s\n", __func__, loaded, m_hess_dir.c_str());
 }
 
 void IMatrixCollector::save_hessians() const {
@@ -629,6 +713,11 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
                 }
                 if (m_params.n_save_freq > 0 && (m_last_chunk % m_params.n_save_freq) / chunk_step == 0) {
                     save_imatrix(m_last_chunk);
+                }
+                if (m_hess_enabled && m_hess_save_every > 0 && m_last_chunk - m_hess_last_save_chunk >= m_hess_save_every) {
+                    save_imatrix();      // keep the imatrix checkpoint in step with the Hessians
+                    save_hessians();
+                    m_hess_last_save_chunk = m_last_chunk;
                 }
             }
         }
